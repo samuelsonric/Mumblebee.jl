@@ -1,0 +1,7 @@
+Manifest.toml
+*.swp
+*.swo
+.DS_IGNORE
+
+# frictional/marginal benchmark data (fetched, not vendored)
+data/

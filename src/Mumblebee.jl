@@ -1,5 +1,8 @@
 module Mumblebee
 
-greet() = print("Hello World!")
+include("BlockSparseArrays/src/BlockSparseArrays.jl")
+include("IPM/IPM.jl")
+
+using .IPM
 
 end # module Mumblebee

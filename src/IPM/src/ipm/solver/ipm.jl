@@ -110,7 +110,8 @@ end
 #
 function solvepredictor!(s::IPMSolver{T}; ftol::T, gtol::T) where {T}
     return solvepredictor!(
-        s.wrk, s.kkt, s.settings, s.H, s.B, s.Q, s.d, s.timers;
+        s.wrk, s.kkt, s.settings, s.H, s.B, s.Q, s.K, s.p, s.d,
+        s.caches, s.sched, s.timers;
         ftol, gtol,
     )
 end
@@ -122,13 +123,22 @@ function solvepredictor!(
         H::BlockSparseMatrix{T},
         B::BlockSparseMatrix{T},
         Q::BlockSparseMatrix{T},
+        K::AbstractVector,
+        p::AbstractVector{T},
         d::AbstractVector{T},
+        caches::Caches{T},
+        sched::ConeSchedule{T},
         timers::TimerOutput;
         ftol::T,
         gtol::T,
     ) where {T}
-    axpby!(-1, d, 0, w.f)
-    axpby!(1, w.Δf, 1, w.f)
+    if set.relax_tol > 0
+        @timeit timers "init" initpredictor!(sched, K, w.f, caches, p, d, set.relax_tol, B)
+    else
+        axpby!(-1, d, 0, w.f)
+    end
+
+    axpy!(1, w.Δf, w.f)
     #
     # solve for the directions Δpa, Δya (base + internal refinement)
     #
@@ -185,6 +195,7 @@ function solvecorrector!(
         ftol::T,
         gtol::T,
     ) where {T}
+    μt = set.relax_tol
     #
     # compute the largest step length τa ∈ (0, 1]
     # such that the perturbed iterates
@@ -210,11 +221,19 @@ function solvecorrector!(
         σμ += (p[j] + τa * w.Δpa[j]) * (d[j] + τa * w.Δda[j])
     end
 
-    if iszero(ν)
-        σμ = zero(T)          # no cones ⇒ no centering; the affine step is exact
+    μa = σμ / ν
+
+    if μt > 0
+        Δμ = μ - μt
+
+        if Δμ > 0
+            Δμa = clamp(μa - μt, zero(T), Δμ)
+            σμ = μt + clamp(Δμa * (Δμa / Δμ)^2, zero(T), Δμ)
+        else
+            σμ = μt           # at or below target ⇒ pure re-centering at μ′
+        end
     else
-        σμ /= ν
-        σμ = clamp(σμ * (σμ / μ)^2, zero(T), μ)
+        σμ = clamp(μa * (μa / μ)^2, zero(T), μ)
     end
     #
     # set f to the Mehrota corrector term:
@@ -472,23 +491,8 @@ function CommonSolve.init(prob::IPMProblem{T}; kw...) where {T}
 end
 
 ############################################################################################
-# mu / isoptimal
+# infeasibility certificates
 ############################################################################################
-#
-# compute the centrality parameter
-#
-#   μ = pᵀd / ν
-#
-function mu(s::IPMSolver{T}) where {T}
-    if iszero(s.ν)
-        μ = zero(T)
-    else
-        μ = dot(s.p, s.d) / s.ν
-    end
-
-    return μ
-end
-
 #
 # The affine iterate is asymptotically a certificate (Todd, FoCM 2004): on a
 # primal-infeasible problem ‖y‖ → ∞ with Qp - d - Bᵀy = O(1), so y/‖y‖ certifies
@@ -502,7 +506,6 @@ function isprimalinfeasible(s::IPMSolver, rtol, atol)
     flag = gy > atol * ny * (1 + s.ng[])
 
     if flag
-        mul!(w.Qp, s.Q, s.p)
         nQp = norm(w.Qp)
         copyto!(w.f, w.Qp)
         axpy!(-1, s.d, w.f)
@@ -530,7 +533,6 @@ function isdualinfeasible(s::IPMSolver, rtol, atol)
 
     if flag
         mul!(w.Δya, s.B, s.p)   # Δya is free scratch here (the predictor overwrites it next)
-        mul!(w.Qp, s.Q, s.p)
         flag = max(norm(w.Δya), norm(w.Qp)) < rtol * abs(fp)
     end
 
@@ -546,10 +548,18 @@ function isneardualinfeasible(s::IPMSolver)
     return isdualinfeasible(s, f * s.settings.infeas_rel, s.settings.infeas_abs)
 end
 
-function nearstatus(s::IPMSolver, status::IPMStatus)
-    residuals!(s)
+function zerofree!(x::AbstractVector{T}, s::IPMSolver) where {T}
+    for v in vtxs(s.B)
+        if s.K[v] isa CofreeCone
+            fill!(view(x, colrange(s.B, v)), zero(T))
+        end
+    end
 
-    if isnearoptimal(s)
+    return x
+end
+
+function nearstatus(s::IPMSolver, status::IPMStatus, μ, μs, pobj, dobj, pres, dres)
+    if isnearoptimal(s, μ, μs, pobj, dobj, pres, dres)
         status = NEAR_OPTIMAL
     elseif isnearprimalinfeasible(s)
         status = NEAR_PRIMAL_INFEASIBLE
@@ -564,105 +574,119 @@ end
 # step!
 ############################################################################################
 
-function step!(s::IPMSolver{T}) where {T}
+function step!(s::IPMSolver)
     status = CONTINUE
 
-    piter = citer = 0       # total CG per role (base + refinement)
-    ppass = cpass = 0       # refinement passes per role
-    pstat = cstat = KKT_SOLVED   # refinement exit status per role
-    step = zero(T)
-    dmin = dmax = T(NaN)   # per-solve min-cost δ-window (kktwindow!)
-    ρ = zero(T)      # ρ-shift actually applied this step (0 = none / no factorization); recorded below
+    (; μ, step, pres, dres, pobj, dobj, ρ, piter, ppass, pstat, citer, cpass, cstat, dmin, dmax, χ) = defaultrow(s.hist)
+    μt = s.settings.relax_tol   # barrier target μ′; 0 = exact solve
 
     w = s.wrk
     #
-    # compute negated residuals
+    # compute the inner product
     #
-    #   [ Δf ]   [ d + f ]   [  Q  -Bᵀ ] [ p ]
-    #   [ Δg ] = [   g   ] - [  B   0  ] [ y ]
+    #   pᵀd
     #
-    residuals!(s)
+    pd = dot(s.p, s.d)
     #
-    # compute the centrality parameter
+    # compute the Hessian
     #
-    #   μ = pᵀd / ν
+    #   f''(w)
     #
-    μ = mu(s)
-    pres = gnorm(w.Δg, s.scaling.yscl, s.sg[])
-    dres = fnorm(w.Δf, s.scaling.pscl, s.sf[])
+    # of the primal barrier function f
+    # at the Nestorov-Todd scaling point w
+    #
+    # for non-symmetric cones, no such point
+    # exists, so the Hessian is replaced
+    # by a Tuncel scaling matrix
+    #
+    flag, spsd = @timeit s.timers "scale" scale!(s)
 
-    pQp = dot(s.p, s.Q, s.p)
-    pobj = pQp / 2 - dot(s.f, s.p)
-    dobj = dot(s.g, s.y) - pQp / 2
-
-    if isoptimal(s, pobj, dobj, pres, dres)
-        status = OPTIMAL
-    elseif isprimalinfeasible(s)
-        status = PRIMAL_INFEASIBLE
-    elseif isdualinfeasible(s)
-        status = DUAL_INFEASIBLE
-    elseif iszero(s.ν)
-        #
-        # choose augmentation parameter δ
-        #
-        setaug!(s)
-
-        initok, ρ = @timeit s.timers "initkkt" initkkt!(s)
-
-        if !initok
-            if s.settings.verbose > 1
-                @warn "Failed to initialize KKT solver."
-            end
-
-            status = nearstatus(s, NUMERICAL_FAILURE)
-        else
-            #
-            # solve the KKT system
-            #
-            #   [ H  -Bᵀ ] [ Δpa ]   [ Δf ]
-            #   [ B   0  ] [ Δya ] = [ Δg ]
-            #
-            piter, ppass, pstat, dmin, dmax = @timeit s.timers "exact" solveexact!(s)
-
-            step = one(T)
-            axpy!(step, w.Δpa, s.p)
-            axpy!(step, w.Δya, s.y)
-
-            if isstalled(s)
-                if s.settings.verbose > 1
-                    @warn "Stalling detected."
-                end
-
-                status = nearstatus(s, STALLED)
-            end
-        end
-    elseif !(μ > 0)
+    if !flag
         if s.settings.verbose > 1
-            @warn "Nonpositive μ."
+            @warn "Scaling failed."
         end
 
-        status = nearstatus(s, NUMERICAL_FAILURE)
+        status = NUMERICAL_FAILURE
     else
         #
-        # compute the Hessian
+        # compute negated residuals
         #
-        #   f''(w)
+        #   [ Δf ]   [ d + f ]   [  Q  -Bᵀ ] [ p ]
+        #   [ Δg ] = [   g   ] - [  B   0  ] [ y ]
         #
-        # of the primal barrier function f
-        # at the Nestorov-Todd scaling point w
+        residuals!(s)
         #
-        # for non-symmetric cones, no such point
-        # exists, so the Hessian is replaced
-        # by a Tuncel scaling matrix
+        # compute the centrality parameter
         #
-        @timeit s.timers "scale" flag = scale!(s)
+        #   μ = pᵀd / ν
+        #
+        μ = pd / max(s.ν, 1)
+        #
+        # compute the dual centrality parameter
+        #
+        #   μ* = p*ᵀ d* / ν
+        #
+        μs = spsd / max(s.ν, 1)
+        #
+        # compute the divergence parameter
+        #
+        #   χ = μ μ* - 1
+        #
+        # which measures how far the iterate (p, d, y)
+        # is from the central path
+        #
+        χ = μ * μs - 1
 
-        if !flag
+        pres = gnorm(w.Δg, s.scaling.yscl, s.sg[])
+        dres = fnorm(w.Δf, s.scaling.pscl, s.sf[])
+
+        mul!(w.Qp, s.Q, s.p)
+        pQp = dot(s.p, w.Qp)
+        pobj = pQp / 2 - dot(s.f, s.p)
+        dobj = dot(s.g, s.y) - pQp / 2
+
+        if isoptimal(s, μ, μs, pobj, dobj, pres, dres)
+            status = OPTIMAL
+        elseif isprimalinfeasible(s)
+            status = PRIMAL_INFEASIBLE
+        elseif isdualinfeasible(s)
+            status = DUAL_INFEASIBLE
+        elseif length(s.hist) ≥ s.settings.max_iter
+            status = nearstatus(s, ITERATION_LIMIT, μ, μs, pobj, dobj, pres, dres)
+        elseif isstalled(s)
+            status = nearstatus(s, STALLED, μ, μs, pobj, dobj, pres, dres)
+        elseif iszero(s.ν)
+            #
+            # choose augmentation parameter δ
+            #
+            setaug!(s)
+
+            initok, ρ = @timeit s.timers "initkkt" initkkt!(s)
+
+            if !initok
+                if s.settings.verbose > 1
+                    @warn "Failed to initialize KKT solver."
+                end
+
+                status = nearstatus(s, NUMERICAL_FAILURE, μ, μs, pobj, dobj, pres, dres)
+            else
+                #
+                # solve the KKT system
+                #
+                #   [ H  -Bᵀ ] [ Δpa ]   [ Δf ]
+                #   [ B   0  ] [ Δya ] = [ Δg ]
+                #
+                piter, ppass, pstat, dmin, dmax = @timeit s.timers "exact" solveexact!(s)
+
+                axpy!(1, w.Δpa, s.p)
+                axpy!(1, w.Δya, s.y)
+            end
+        elseif !(μ > 0)
             if s.settings.verbose > 1
-                @warn "Scaling failed."
+                @warn "Nonpositive μ."
             end
 
-            status = nearstatus(s, NUMERICAL_FAILURE)
+            status = nearstatus(s, NUMERICAL_FAILURE, μ, μs, pobj, dobj, pres, dres)
         else
             #
             # choose augmentation parameter δ
@@ -676,7 +700,7 @@ function step!(s::IPMSolver{T}) where {T}
                     @warn "Failed to initialize KKT solver."
                 end
 
-                status = nearstatus(s, NUMERICAL_FAILURE)
+                status = nearstatus(s, NUMERICAL_FAILURE, μ, μs, pobj, dobj, pres, dres)
             else
                 #
                 # compute tolerances for predictor and corrector solves
@@ -689,7 +713,14 @@ function step!(s::IPMSolver{T}) where {T}
                     μ1 = first(s.hist.μ)
                 end
 
-                tol = FORCING_FRAC * μ / μ1
+                if μt > 0
+                    Δμ  = abs(μ  - μt)
+                    Δμ1 = abs(μ1 - μt)
+                    tol = FORCING_FRAC * min(Δμ / Δμ1, 1)
+                else
+                    tol = FORCING_FRAC * μ / μ1
+                end
+
                 ftol = tol * (1 + s.nf[])
                 gtol = tol * (1 + s.ng[])
                 #
@@ -700,11 +731,7 @@ function step!(s::IPMSolver{T}) where {T}
                 #
                 piter, ppass, pstat, dmin, dmax = @timeit s.timers "predictor" solvepredictor!(s; ftol, gtol)
 
-                for v in vtxs(s.B)
-                    if s.K[v] isa CofreeCone
-                        fill!(view(w.Δda, colrange(s.B, v)), zero(T))
-                    end
-                end
+                zerofree!(w.Δda, s)
                 #
                 # solve for the Mehrotra combined direction
                 #
@@ -715,18 +742,14 @@ function step!(s::IPMSolver{T}) where {T}
                 #
                 citer, cpass, cstat = @timeit s.timers "corrector" solvecorrector!(s, μ; ftol, gtol)
 
-                for v in vtxs(s.B)
-                    if s.K[v] isa CofreeCone
-                        fill!(view(w.Δd, colrange(s.B, v)), zero(T))
-                    end
-                end
+                zerofree!(w.Δd, s)
 
                 if pstat !== KKT_SOLVED || cstat !== KKT_SOLVED
                     if s.settings.verbose > 1
                         @info "KKT solve above target tolerance" pstat cstat
                     end
 
-                    status = nearstatus(s, NUMERICAL_FAILURE)
+                    status = nearstatus(s, NUMERICAL_FAILURE, μ, μs, pobj, dobj, pres, dres)
                 else
                     #
                     # find the largest step sizes such that
@@ -744,21 +767,13 @@ function step!(s::IPMSolver{T}) where {T}
                     axpy!(step, w.Δp, s.p)
                     axpy!(step, w.Δd, s.d)
                     axpy!(step, w.Δy, s.y)
-
-                    if isstalled(s)
-                        if s.settings.verbose > 1
-                            @warn "Stalling detected."
-                        end
-
-                        status = nearstatus(s, STALLED)
-                    end
                 end
             end
         end
     end
 
     push!(s.hist, (; μ, step, pres, dres, pobj, dobj, ρ, δ=s.δ[], piter, ppass, pstat, citer, cpass, cstat,
-        dmin, dmax))
+        dmin, dmax, χ))
 
     return status
 end

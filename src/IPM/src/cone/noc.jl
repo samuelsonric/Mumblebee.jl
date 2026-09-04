@@ -36,7 +36,7 @@ function identity!(x::AbstractVector{T}, ::CofreeCone) where {T}
 end
 
 function scale!(::AbstractMatrix{T}, ::AbstractVector{T}, ::AbstractVector{T}, ::CofreeConeCache, ::ConeWorkspace) where {T}
-    return true
+    return true, zero(T)
 end
 
 function corr!(
@@ -49,6 +49,11 @@ function corr!(
         ::CofreeConeCache,
         ::ConeWorkspace,
     ) where {T}
+    fill!(r, zero(T))
+    return r
+end
+
+function corr0!(r::AbstractVector{T}, ::AbstractVector, ::AbstractVector, ::Real, ::CofreeConeCache, ::ConeWorkspace) where {T}
     fill!(r, zero(T))
     return r
 end

@@ -75,8 +75,8 @@ function sdpscalestatic!(
     @inbounds smatstatic!(P, p, Val(N))
     @inbounds smatstatic!(D, d, Val(N))
 
-    @inbounds cholstatic!(Symmetric(P, :L), Val(N)) || return false
-    @inbounds cholstatic!(Symmetric(D, :L), Val(N)) || return false
+    @inbounds cholstatic!(Symmetric(P, :L), Val(N)) || return false, zero(T)
+    @inbounds cholstatic!(Symmetric(D, :L), Val(N)) || return false, zero(T)
     #
     # svd of Pᵀ D straight into the R cache: R ← Pᵀ D, then
     # svd overwrites R with its left singular vectors U.
@@ -84,7 +84,7 @@ function sdpscalestatic!(
     #
     @inbounds copystatic!(R, LowerTriangular(D), Val(N))
     @inbounds lmulstatic!(LowerTriangular(P)', R, Val(N))     # R = Pᵀ D
-    @inbounds svdjacobi!(R, s) || return false
+    @inbounds svdjacobi!(R, s) || return false, zero(T)
 
     @inbounds copystatic!(S, R, Val(N))                       # S = U
     @inbounds lmulstatic!(LowerTriangular(P), S, Val(N))      # S = P U
@@ -103,8 +103,16 @@ function sdpscalestatic!(
     @inbounds syrkstatic!(D, P, Val(N))
     @inbounds symmstatic!(D, Val(N))
     @inbounds skronstatic!(H, D, Val(N))
+    #
+    # ⟨p*, d*⟩ = tr(P⁻¹ D⁻¹) = Σ 1/sᵢ²  (sᵢ² = μ on the central path)
+    #
+    spsd = zero(T)
 
-    return true
+    @inbounds for i in 1:N
+        spsd += inv(s[i]^2)
+    end
+
+    return true, spsd
 end
 
 function sdpscaledynamic!(
@@ -125,10 +133,10 @@ function sdpscaledynamic!(
     smat!(D, d)
 
     FP = cholesky!(Symmetric(P, :L); check=false)
-    issuccess(FP) || return false
+    issuccess(FP) || return false, zero(T)
 
     FD = cholesky!(Symmetric(D, :L); check=false)
-    issuccess(FD) || return false
+    issuccess(FD) || return false, zero(T)
 
     # svd of Pᵀ D straight into the R cache: R = left singular vectors U,
     # then S = P U and R = P⁻ᵀ U in place.
@@ -152,8 +160,16 @@ function sdpscaledynamic!(
     syrk!(D, P)
     symmetrize!(D)
     skron!(H, D)
+    #
+    # ⟨p*, d*⟩ = tr(P⁻¹ D⁻¹) = Σ 1/sᵢ²  (sᵢ² = μ on the central path)
+    #
+    spsd = zero(T)
 
-    return true
+    @inbounds for i in eachindex(s)
+        spsd += inv(s[i]^2)
+    end
+
+    return true, spsd
 end
 
 function sdpscale!(
@@ -328,6 +344,82 @@ function sdpcorrdynamic!(
     return r
 end
 
+# sdpcorr! with Δp = Δd = 0.
+function sdpcorr0!(
+        r::AbstractVector{T},
+        R::AbstractMatrix{T},
+        s::AbstractVector{T},
+        σμ::Real,
+        wrk::ConeWorkspace{T},
+    ) where {T}
+    n = size(R, 1)
+
+    n == 1 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(1))
+    n == 2 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(2))
+    n == 3 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(3))
+    n == 4 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(4))
+    n == 5 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(5))
+    n == 6 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(6))
+    n == 7 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(7))
+    n == 8 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(8))
+    return sdpcorr0dynamic!(r, R, s, σμ, wrk)
+end
+
+function sdpcorr0static!(
+        r::AbstractVector{T},
+        R::AbstractMatrix{T},
+        s::AbstractVector{T},
+        σμ::Real,
+        wrk::ConeWorkspace{T},
+        ::Val{N},
+    ) where {T, N}
+    m = N * N
+
+    ΔP = reshape(view(wrk.data, 0m + 1:1m), N, N)
+    W  = reshape(view(wrk.data, 2m + 1:3m), N, N)
+
+    @inbounds for j in 1:N
+        for i in 1:N
+            W[i, j] = zero(T)
+        end
+
+        W[j, j] = σμ - s[j]^2
+    end
+    #
+    #   W = R Ŵ Rᵀ,  r = svec(W)   (ΔP the intermediate)
+    #
+    @inbounds mulstatic!(ΔP, W, R', Val(N))
+    @inbounds mulstatic!(W, R, ΔP, Val(N))
+
+    @inbounds svecstatic!(r, W, Val(N))
+    return r
+end
+
+function sdpcorr0dynamic!(
+        r::AbstractVector{T},
+        R::AbstractMatrix{T},
+        s::AbstractVector{T},
+        σμ::Real,
+        wrk::ConeWorkspace{T},
+    ) where {T}
+    n = size(R, 1); m = n * n
+
+    ΔP = reshape(view(wrk.data, 0m + 1:1m), n, n)
+    W  = reshape(view(wrk.data, 2m + 1:3m), n, n)
+
+    fill!(W, zero(T))
+
+    for j in 1:n
+        W[j, j] = σμ - s[j]^2
+    end
+
+    mul!(ΔP, W, R')
+    mul!(W, R, ΔP)
+
+    svec!(r, W)
+    return r
+end
+
 # Find the largest number 0 < τ ≤ 1 such that
 #
 #   L Lᵀ + τ ΔX = L (I + τ M) Lᵀ
@@ -492,6 +584,10 @@ function corr!(
         wrk::ConeWorkspace{T},
     ) where {T}
     return sdpcorr!(r, cache.R, cache.S, cache.s, Δp, Δd, σμ, wrk)
+end
+
+function corr0!(r::AbstractVector{T}, ::AbstractVector{T}, ::AbstractVector{T}, σμ::Real, cache::SemidefiniteConeCache{T}, wrk::ConeWorkspace{T}) where {T}
+    return sdpcorr0!(r, cache.R, cache.s, σμ, wrk)
 end
 
 function maxsteps(::AbstractVector{T}, Δp::AbstractVector{T}, ::AbstractVector{T}, Δd::AbstractVector{T}, cache::SemidefiniteConeCache{T}, wrk::ConeWorkspace{T}) where {T}

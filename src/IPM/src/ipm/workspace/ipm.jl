@@ -29,6 +29,10 @@ struct IPMWorkspace{T} <: AbstractWorkspace{T}
     #
     step::FVector{T}
     flag::FVector{Bool}
+    #
+    # per-block ⟨pᵥ*, dᵥ*⟩ harvested by scale! (χ centrality measure)
+    #
+    spsd::FVector{T}
 end
 
 function IPMWorkspace{T}(m::Integer, n::Integer, nv::Integer) where {T}
@@ -45,5 +49,6 @@ function IPMWorkspace{T}(m::Integer, n::Integer, nv::Integer) where {T}
         FVector{T}(undef, n),  # Δd
         FVector{T}(undef, nv),     # step
         FVector{Bool}(undef, nv),  # flag
+        FVector{T}(undef, nv),     # spsd
     )
 end

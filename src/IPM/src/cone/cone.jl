@@ -156,6 +156,13 @@ where Δp ∘ Δd is the Jordan product of Δp and Δd.
 corr!(r::AbstractVector, p::AbstractVector, d::AbstractVector, Δp::AbstractVector, Δd::AbstractVector, σμ::Number, cache::AbstractCache)
 
 """
+    corr0!(r, p, d, σμ, cache, wrk)
+
+[`corr`](@ref) with Δp = Δd = 0.
+"""
+corr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ::Number, cache::AbstractCache, wrk::ConeWorkspace)
+
+"""
     maxsteps(p, Δp, d, Δd, cache)
 
 Compute the largest numbers 0 < τp, τd ≤ 1 such that

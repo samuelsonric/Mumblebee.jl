@@ -170,8 +170,8 @@ function socscale!(
     #   p ∈ ri K
     #   d ∈ ri K
     #
-    (pdet > 0 && p[1] > 0) || return false, zero(T)
-    (ddet > 0 && d[1] > 0) || return false, zero(T)
+    (pdet > 0 && p[1] > 0) || return false, zero(T), zero(T)
+    (ddet > 0 && d[1] > 0) || return false, zero(T), zero(T)
 
     pdot = cdot(p, d)
 
@@ -206,8 +206,12 @@ function socscale!(
             H[i, j] = H[j, i] += 2η * w[i] * wj
         end
     end
+    #
+    # ⟨p*, d*⟩ = 4⟨p, d⟩ / (det(p) det(d))
+    #
+    spsd = 4 * pdot / (pdet * ddet)
 
-    return true, β
+    return true, β, spsd
 end
 
 function soccorr!(
@@ -240,6 +244,24 @@ function soccorr!(
     socdiv!(Δp, r)
 
     axpy!(one(T), Δp, r)
+    socroot!(r, w, β, false)
+
+    r[1] = 2σμ * p[1] / pdet - r[1]
+
+    for i in 2:n
+        r[i] = -2σμ * p[i] / pdet - r[i]
+    end
+
+    return r
+end
+
+# soccorr! with Δp = Δd = 0.
+function soccorr0!(r::AbstractVector{T}, w::AbstractVector{T}, β::T, p::AbstractVector{T}, σμ::Real) where {T}
+    n = length(p)
+    pdet = socdet(p)
+
+    copyto!(r, p)
+    socroot!(r, w, β, false)
     socroot!(r, w, β, false)
 
     r[1] = 2σμ * p[1] / pdet - r[1]
@@ -369,9 +391,9 @@ function identity!(x::AbstractVector, ::SecondOrderCone)
 end
 
 function scale!(H::AbstractMatrix, p::AbstractVector, d::AbstractVector, cache::SecondOrderConeCache, ::ConeWorkspace)
-    flag, β = socscale!(H, cache.w, p, d)
+    flag, β, spsd = socscale!(H, cache.w, p, d)
     cache.β[] = β
-    return flag
+    return flag, spsd
 end
 
 function corr!(
@@ -385,6 +407,10 @@ function corr!(
         wrk::ConeWorkspace,
     )
     soccorr!(r, cache.w, cache.β[], p, Δp, Δd, σμ, wrk)
+end
+
+function corr0!(r::AbstractVector, p::AbstractVector, ::AbstractVector, σμ::Real, cache::SecondOrderConeCache, ::ConeWorkspace)
+    return soccorr0!(r, cache.w, cache.β[], p, σμ)
 end
 
 function maxsteps(p::AbstractVector, Δp::AbstractVector, d::AbstractVector, Δd::AbstractVector, ::SecondOrderConeCache, ::ConeWorkspace)

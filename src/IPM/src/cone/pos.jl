@@ -32,12 +32,15 @@ end
 #
 # is the Nesterov-Todd scaling point.
 #
-function posscale!(H::AbstractMatrix, p::AbstractVector, d::AbstractVector)
+function posscale!(H::AbstractMatrix, p::AbstractVector{T}, d::AbstractVector) where {T}
+    spsd = zero(T)
+
     for i in eachindex(p)
         H[i, i] += d[i] / p[i]
+        spsd += inv(p[i] * d[i])
     end
 
-    return true
+    return true, spsd
 end
 
 # Compute the corrector term
@@ -54,6 +57,15 @@ function poscorr!(
     )
     for i in eachindex(r)
         r[i] = (σμ - Δp[i] * Δd[i]) / p[i] - d[i]
+    end
+
+    return r
+end
+
+# poscorr! with Δp = Δd = 0.
+function poscorr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ::Real)
+    for i in eachindex(r)
+        r[i] = σμ / p[i] - d[i]
     end
 
     return r
@@ -116,6 +128,10 @@ function corr!(
         ::ConeWorkspace,
     )
     return poscorr!(r, p, d, Δp, Δd, σμ)
+end
+
+function corr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ::Real, ::PositiveConeCache, ::ConeWorkspace)
+    return poscorr0!(r, p, d, σμ)
 end
 
 function maxsteps(p::AbstractVector, Δp::AbstractVector, d::AbstractVector, Δd::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)

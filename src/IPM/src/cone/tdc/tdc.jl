@@ -160,6 +160,7 @@ function tdscale!(
     δd = view(wrk.data, 13:15)
 
     next = one(T)
+    spsd = zero(T)
     #
     # compute the "determinant"
     #
@@ -198,7 +199,8 @@ function tdscale!(
         #
         #   μ* = ⟨p*, d*⟩ / ν
         #
-        μt = cdotstatic(sp, sd, Val(3)) / 3
+        spsd = cdotstatic(sp, sd, Val(3))
+        μt = spsd / 3
         #
         # compute the cross-product
         #
@@ -247,7 +249,7 @@ function tdscale!(
         end
     end
 
-    return flag, next
+    return flag, next, spsd
 end
 
 # Compute the Mehrotra corrector term
@@ -304,6 +306,13 @@ function tdcorr!(
     return r
 end
 
+# tdcorr! with Δp = Δd = 0.
+function tdcorr0!(r::AbstractVector{T}, sd::AbstractVector{T}, d::AbstractVector{T}, σμ::Real) where {T}
+    copystatic!(r, d, Val(3))
+    axpbystatic!(σμ, sd, -1, r, Val(3))
+    return r
+end
+
 function tdmaxsteps(
         p::AbstractVector{T},
         Δp::AbstractVector{T},
@@ -341,13 +350,17 @@ function cachesize(::Type{<:AbstractTDCone}, n::Integer)
 end
 
 function scale!(H::AbstractMatrix{T}, p::AbstractVector{T}, d::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, wrk::ConeWorkspace{T}) where {C, T}
-    flag, seed = tdscale!(H, cache.L, cache.sd, cache.seed[], p, d, cache, wrk)
+    flag, seed, spsd = tdscale!(H, cache.L, cache.sd, cache.seed[], p, d, cache, wrk)
     cache.seed[] = seed
-    return flag
+    return flag, spsd
 end
 
 function corr!(r::AbstractVector{T}, p::AbstractVector{T}, d::AbstractVector{T}, Δp::AbstractVector{T}, Δd::AbstractVector{T}, σμ::Real, cache::AbstractTDConeCache{C, T}, wrk::ConeWorkspace{T}) where {C, T}
     return tdcorr!(r, cache.L, cache.sd, p, d, Δp, Δd, σμ, cache, wrk)
+end
+
+function corr0!(r::AbstractVector{T}, ::AbstractVector{T}, d::AbstractVector{T}, σμ::Real, cache::AbstractTDConeCache{C, T}, ::ConeWorkspace{T}) where {C, T}
+    return tdcorr0!(r, cache.sd, d, σμ)
 end
 
 function maxsteps(p::AbstractVector{T}, Δp::AbstractVector{T}, d::AbstractVector{T}, Δd::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, wrk::ConeWorkspace{T}) where {C, T}

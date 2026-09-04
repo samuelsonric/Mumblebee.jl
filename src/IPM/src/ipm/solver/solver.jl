@@ -6,13 +6,27 @@ const FORCING_CEIL = 0.3
 include("ipm.jl")
 include("utils.jl")
 
-function isoptimal(s::AbstractSolver, pobj, dobj, pres, dres)
-    return isoptimal(pobj, dobj, pres, dres; gap_tol=s.settings.gap_tol, feas_tol=s.settings.feas_tol)
+function isoptimal(s::AbstractSolver, μ, μs, pobj, dobj, pres, dres)
+    return isoptimal(μ, μs, s.settings.relax_tol, pobj, dobj, pres, dres, s.ν;
+        gap_tol=s.settings.gap_tol, feas_tol=s.settings.feas_tol)
 end
 
-function isoptimal(pobj::T, dobj::T, pres::T, dres::T; gap_tol::T, feas_tol::T) where {T}
-    return pobj - dobj < gap_tol * max(one(T), min(abs(pobj), abs(dobj))) &&
-        pres < feas_tol && dres < feas_tol
+function isnearoptimal(s::AbstractSolver, μ, μs, pobj, dobj, pres, dres)
+    f = s.settings.near_factor
+    return isoptimal(μ, μs, s.settings.relax_tol, pobj, dobj, pres, dres, s.ν;
+        gap_tol=f * s.settings.gap_tol, feas_tol=f * s.settings.feas_tol)
+end
+
+function isoptimal(μ::T, μs::T, μt::T, pobj::T, dobj::T, pres::T, dres::T, ν::Integer; gap_tol::T, feas_tol::T) where {T}
+    pres < feas_tol && dres < feas_tol || return false
+
+    tol = gap_tol * max(one(T), min(abs(pobj), abs(dobj)))
+
+    if μt > 0
+        return ν * (μ - μt + μt * log1p(μs * μt - one(T))) ≤ tol
+    else
+        return pobj - dobj < tol
+    end
 end
 
 function fnorm(Δf::AbstractVector, pscl::AbstractVector, sf::Real)
@@ -52,10 +66,6 @@ end
 
 function isstalled(s::AbstractSolver)
     return isstalled(s.hist, s.settings.stall_tol)
-end
-
-function isnearoptimal(s::AbstractSolver)
-    return isnearoptimal(s.hist; feas_tol=s.settings.feas_tol, gap_tol=s.settings.gap_tol, near_factor=s.settings.near_factor)
 end
 
 function initkkt!(s::AbstractSolver{T}) where {T}
@@ -204,6 +214,10 @@ function scale!(
     error()
 end
 
+function scale!(::CofreeCone, ::Integer, ::BlockSparseMatrix{T}, ::BlockSparseMatrix, ::Caches, ::AbstractVector, ::AbstractVector, ::BlockSparseMatrix, ::ConeWorkspace) where {T}
+    return true, zero(T)
+end
+
 #
 # compute the Hessian
 #
@@ -217,7 +231,7 @@ end
 # by a Tuncel scaling matrix
 #
 function scale!(s::AbstractSolver)
-    return scale!(s.sched, s.K, s.H, s.Q, s.caches, s.p, s.d, s.B, s.wrk.flag)
+    return scale!(s.sched, s.K, s.H, s.Q, s.caches, s.p, s.d, s.B, s.wrk.flag, s.wrk.spsd)
 end
 
 function scale!(
@@ -230,14 +244,14 @@ function scale!(
         d::AbstractVector,
         B::BlockSparseMatrix,
         flags::AbstractVector,
+        spsds::AbstractVector,
     )
     if sched.nsmll <= 1
-        scale_st!(sched, K, H, Q, caches, p, d, B, flags)
+        scale_st!(sched, K, H, Q, caches, p, d, B, flags, spsds)
     else
-        scale_mt!(sched, K, H, Q, caches, p, d, B, flags)
+        scale_mt!(sched, K, H, Q, caches, p, d, B, flags, spsds)
     end
-
-    return all(flags)
+    return all(flags), sum(spsds)
 end
 
 function scale_st!(
@@ -250,9 +264,10 @@ function scale_st!(
         d::AbstractVector,
         B::BlockSparseMatrix,
         flags::AbstractVector,
+        spsds::AbstractVector,
     )
     @inbounds for v in vtxs(B)
-        flags[v] = scale!(K[v], v, H, Q, caches, p, d, B, sched.large)
+        flags[v], spsds[v] = scale!(K[v], v, H, Q, caches, p, d, B, sched.large)
     end
 
     return
@@ -268,10 +283,11 @@ function scale_mt!(
         d::AbstractVector,
         B::BlockSparseMatrix,
         flags::AbstractVector,
+        spsds::AbstractVector,
     ) where {I}
     @inbounds for v in vtxs(B)
         if ncols(B, v) > SMALL_CONE_THRESHOLD
-            flags[v] = scale!(K[v], v, H, Q, caches, p, d, B, sched.large)
+            flags[v], spsds[v] = scale!(K[v], v, H, Q, caches, p, d, B, sched.large)
         end
     end
 
@@ -283,7 +299,7 @@ function scale_mt!(
 
         @inbounds for v in sstrt:sstop
             if ncols(B, v) <= SMALL_CONE_THRESHOLD
-                flags[v] = scale!(K[v], v, H, Q, caches, p, d, B, ws)
+                flags[v], spsds[v] = scale!(K[v], v, H, Q, caches, p, d, B, ws)
             end
         end
     end
@@ -388,6 +404,95 @@ function initcorrector_mt!(
     return
 end
 
+############################################################################################
+# initpredictor!
+############################################################################################
+
+function initpredictor!(
+        cone::AbstractCone,
+        v::Integer,
+        f::AbstractVector,
+        caches::Caches,
+        p::AbstractVector,
+        d::AbstractVector,
+        σμ::Real,
+        B::BlockSparseMatrix,
+        conewrk::ConeWorkspace,
+    )
+    r = colrange(B, v)
+    cv = cache(caches, v, cone)
+    corr0!(view(f, r), view(p, r), view(d, r), σμ, cv, conewrk)
+    return
+end
+
+function initpredictor!(
+        sched::ConeSchedule,
+        K::AbstractVector,
+        f::AbstractVector,
+        caches::Caches,
+        p::AbstractVector,
+        d::AbstractVector,
+        σμ::Real,
+        B::BlockSparseMatrix,
+    )
+    if sched.nsmll <= 1
+        initpredictor_st!(sched, K, f, caches, p, d, σμ, B)
+    else
+        initpredictor_mt!(sched, K, f, caches, p, d, σμ, B)
+    end
+
+    return
+end
+
+function initpredictor_st!(
+        sched::ConeSchedule,
+        K::AbstractVector,
+        f::AbstractVector,
+        caches::Caches,
+        p::AbstractVector,
+        d::AbstractVector,
+        σμ::Real,
+        B::BlockSparseMatrix,
+    )
+    @inbounds for v in vtxs(B)
+        initpredictor!(K[v], v, f, caches, p, d, σμ, B, sched.large)
+    end
+
+    return
+end
+
+function initpredictor_mt!(
+        sched::ConeSchedule{<:Any, I},
+        K::AbstractVector,
+        f::AbstractVector,
+        caches::Caches,
+        p::AbstractVector,
+        d::AbstractVector,
+        σμ::Real,
+        B::BlockSparseMatrix,
+    ) where {I}
+    @inbounds for v in vtxs(B)
+        if ncols(B, v) > SMALL_CONE_THRESHOLD
+            initpredictor!(K[v], v, f, caches, p, d, σμ, B, sched.large)
+        end
+    end
+
+    @threads for s in oneto(sched.nsmll)
+        ws = sched.small[s]
+
+        sstrt = sched.xsmll[s]
+        sstop = sched.xsmll[s + one(I)] - one(I)
+
+        @inbounds for v in sstrt:sstop
+            if ncols(B, v) <= SMALL_CONE_THRESHOLD
+                initpredictor!(K[v], v, f, caches, p, d, σμ, B, ws)
+            end
+        end
+    end
+
+    return
+end
+
 function solve_impl!(s::AbstractSolver, io::IO)
     status = CONTINUE; i = 0
 
@@ -398,14 +503,10 @@ function solve_impl!(s::AbstractSolver, io::IO)
     end
 
     while status == CONTINUE
-        if i ≥ s.settings.max_iter
-            status = nearstatus(s, ITERATION_LIMIT)
-        else
-            status = step!(s); i += 1
+        status = step!(s); i += 1
 
-            if s.settings.verbose > 0
-                showrow(io, i, s.hist[i])
-            end
+        if s.settings.verbose > 0
+            showrow(io, i, s.hist[i])
         end
 
         if status != CONTINUE

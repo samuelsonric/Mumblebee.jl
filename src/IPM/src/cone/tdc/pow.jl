@@ -50,17 +50,16 @@ end
 #
 #   (x₁ᵃx₂ᵇ, x₁ᵃx₂ᵇ / det(x), 1 / det(x)).
 #
-function powdet(x1::T, x2::T, x3::T, α::T) where {T <: AbstractFloat}
+function powdet(x1::T, x2::T, x3::T, α::T) where {T}
     a = 2α                                        # exact; uses the stored α
-    bh, bl = twosum(oftype(a, 2), -a)             # b exact in two words
-    l1h, l1l = twolog(x1)
-    l2h, l2l = twolog(x2)
-    p1h, e1 = twoprod(l1h, a);   e1 = muladd(l1l, a, e1)
-    p2h, e2 = twoprod(l2h, bh);  e2 = muladd(l2l, bh, e2)
-    e2 = muladd(l2h, bl, e2)                      # fold the lo word of b
-    sh, se = twosum(p1h, p2h)
-    Lh, Ll = twosum(sh, se + e1 + e2)             # L = a·log x₁ + b·log x₂
-    Ph, Pl = twoexp(Lh, Ll)
+    #
+    # P = x₁^a x₂^b = 2^L2,  b = 2 − a,  regrouped in base 2 so b never appears:
+    #   L2 = a·log₂(x₁/x₂) + 2·log₂x₂
+    #
+    rh, rl = twolog2rat(x1, x2)                   # log₂(x₁/x₂), two words
+    gh, gl = DF._unsafe_log2((x2, zero(T)))       # log₂x₂, two words
+    L2 = DF.add_dddd_dd_(DF.mul_dddd_dd_((a, zero(T)), (rh, rl)), (2gh, 2gl))
+    Ph, Pl = twoexp2(L2[1], L2[2])
     qh, ql = twoprod(x3, x3)
     fh, fe = twosum(Ph, -qh)
     dh, dl = twosum(fh, fe + (Pl - ql))           # det, two words
@@ -68,7 +67,7 @@ function powdet(x1::T, x2::T, x3::T, α::T) where {T <: AbstractFloat}
     ρh, ρe = twoprod(Ph, ih)                      # ρ = P·invdet
     ρe = muladd(Ph, il, muladd(Pl, ih, ρe))
     ρh, ρl = twosum(ρh, ρe)
-    return T(Ph + Pl), T(ρh + ρl), T(ih + il)
+    return Ph + Pl, ρh + ρl, ih + il
 end
 
 # evaluate the gradient

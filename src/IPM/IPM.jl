@@ -2,7 +2,7 @@ module IPM
 
 using LinearAlgebra
 using LinearAlgebra: chkstride1, BlasFloat, BlasInt, LowerTriangular, Adjoint, AdjOrTrans, RowMaximum
-using DoubleFloats: Double64, HI, LO
+import DoubleFloats as DF
 using Printf: @sprintf, @printf
 using LinearAlgebra.BLAS: @blasfunc, libblastrampoline
 using LinearAlgebra.LAPACK: chklapackerror

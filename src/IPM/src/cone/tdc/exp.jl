@@ -41,26 +41,21 @@ end
 #
 #   (det(x), 1/det(x), log(x₁/x₂), log(x₁/x₂) - 1)
 #
-function expdet(x1::T, x2::T, x3::T) where {T <: AbstractFloat}
-    if T(0.5) * x2 <= x1 <= 2x2
-        d = x1 - x2                              # Sterbenz: exact
-        qh, ql = twodiv(d, zero(T), x2, zero(T))
-        lrh, lrl = twolog1p(qh, ql)
-    else
-        l1h, l1l = twolog(x1)
-        l2h, l2l = twolog(x2)
-        rh, re = twosum(l1h, -l2h)
-        lrh, lrl = twosum(rh, re + (l1l - l2l))
-    end
+function expdet(x1::T, x2::T, x3::T) where {T}
+    #
+    # lr = log(x₁/x₂), two words (twolograt handles the tiny-lr Sterbenz case and
+    # the far case internally, fully relative-accurate at every scale)
+    #
+    lrh, lrl = twolograt(x1, x2)
 
     mh, me = twosum(lrh, -one(T))
-    lrm1 = T(mh + (me + lrl))                    # lr − 1 off the two-word lr
+    lrm1 = mh + (me + lrl)                       # lr − 1 off the two-word lr
     ph, pe = twoprod(lrh, x2)
     pe = muladd(lrl, x2, pe)                     # x₂·lr, two words
     sh, se = twosum(ph, -x3)
     ψh, ψl = twosum(sh, se + pe)
     ih, il = twodiv(one(T), zero(T), ψh, ψl)
-    return T(ψh + ψl), T(ih + il), T(lrh + lrl), lrm1
+    return ψh + ψl, ih + il, lrh + lrl, lrm1
 end
 
 # The gradient

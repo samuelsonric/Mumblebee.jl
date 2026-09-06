@@ -187,7 +187,7 @@ function build_mixed_norm(inst::MixedNormInstance; branch = min(inst.n, 10))
         f[first(colrange(B_bs, zid[i, j]))] = -c[i]
     end
 
-    return IPMProblem(Q, B_bs, f, gs, cones)
+    return IPMProblem(Q, B_bs, f, gs, 0.0, cones)
 end
 
 # Recover the facility position from the split width-1 x stalks.

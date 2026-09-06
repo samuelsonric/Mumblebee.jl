@@ -292,7 +292,7 @@ function build_h2(inst::ChainInstance; eps::Float64 = 1.0e-6, delta::Float64 = 1
 
     cones = IPM.AbstractCone[SemidefiniteCone() for _ in 1:(2n - 1)]
 
-    return IPMProblem(Q, B, c, g, cones), B
+    return IPMProblem(Q, B, c, g, 0.0, cones), B
 end
 
 # The H₂ norm recovered from the solver objective: the objective of (3) is

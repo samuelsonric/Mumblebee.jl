@@ -17,13 +17,13 @@ struct IPMSolver{T, I, V, KKT} <: AbstractSolver{T}
     kkt::KKT
     hist::IPMHistory{T}
     ν::Int
+    μ::T                # barrier target μ′ (problem data); 0 = exact solve
     settings::IPMSettings{T}
     nf::FScalar{T}
     ng::FScalar{T}
     sg::FScalar{T}     # ‖g‖ in original (unscaled) units — B-primal stopping-test denominator
     sf::FScalar{T}     # ‖f‖ in original (unscaled) units — dual stopping-test denominator
     nB::FScalar{T}      # ‖B‖ — fixed for the solver's lifetime; the cold-start augmentation anchor
-    δ::FScalar{T}       # reciprocal augmentation 1/α; owned by setaug!
     timers::TimerOutput
 end
 
@@ -110,7 +110,7 @@ end
 #
 function solvepredictor!(s::IPMSolver{T}; ftol::T, gtol::T) where {T}
     return solvepredictor!(
-        s.wrk, s.kkt, s.settings, s.H, s.B, s.Q, s.K, s.p, s.d,
+        s.wrk, s.kkt, s.settings, s.μ, s.H, s.B, s.Q, s.K, s.p, s.d,
         s.caches, s.sched, s.timers;
         ftol, gtol,
     )
@@ -120,6 +120,7 @@ function solvepredictor!(
         w::IPMWorkspace{T},
         kkt::KKTSolver{T},
         set::IPMSettings{T},
+        μt::T,
         H::BlockSparseMatrix{T},
         B::BlockSparseMatrix{T},
         Q::BlockSparseMatrix{T},
@@ -132,8 +133,8 @@ function solvepredictor!(
         ftol::T,
         gtol::T,
     ) where {T}
-    if set.relax_tol > 0
-        @timeit timers "init" initpredictor!(sched, K, w.f, caches, p, d, set.relax_tol, B)
+    if μt > 0
+        @timeit timers "init" initpredictor!(sched, K, w.f, caches, p, d, μt, B)
     else
         axpby!(-1, d, 0, w.f)
     end
@@ -171,7 +172,7 @@ end
 #
 function solvecorrector!(s::IPMSolver{T}, μ::T; ftol::T, gtol::T) where {T}
     return solvecorrector!(
-        s.wrk, s.kkt, s.settings, s.H, s.B, s.Q, s.K, s.p, s.d,
+        s.wrk, s.kkt, s.settings, s.μ, s.H, s.B, s.Q, s.K, s.p, s.d,
         s.caches, s.sched, s.ν, μ, s.timers;
         ftol, gtol,
     )
@@ -181,6 +182,7 @@ function solvecorrector!(
         w::IPMWorkspace{T},
         kkt::KKTSolver{T},
         set::IPMSettings{T},
+        μt::T,
         H::BlockSparseMatrix{T},
         B::BlockSparseMatrix{T},
         Q::BlockSparseMatrix{T},
@@ -195,7 +197,6 @@ function solvecorrector!(
         ftol::T,
         gtol::T,
     ) where {T}
-    μt = set.relax_tol
     #
     # compute the largest step length τa ∈ (0, 1]
     # such that the perturbed iterates
@@ -461,7 +462,6 @@ function IPMSolver(prob::IPMProblem{T, I}, settings::IPMSettings{T}; p0=nothing,
     sg = FScalar{T}(undef)
     sf = FScalar{T}(undef)
     nB = FScalar{T}(undef)
-    δ = FScalar{T}(undef)
 
     nB[] = norm(B)
     nf[] = norm(f)
@@ -471,7 +471,7 @@ function IPMSolver(prob::IPMProblem{T, I}, settings::IPMSettings{T}; p0=nothing,
 
     solver = IPMSolver(Q, H, B, f, g, p, d, y, cones,
         scaling, P2, P1, ipmwrk, caches, sched, kkt,
-        hist, ν, settings, nf, ng, sg, sf, nB, δ, TimerOutput()
+        hist, ν, prob.μ, settings, nf, ng, sg, sf, nB, TimerOutput()
     )
 
     return reinit!(solver; p0, d0, y0)
@@ -577,8 +577,13 @@ end
 function step!(s::IPMSolver)
     status = CONTINUE
 
-    (; μ, step, pres, dres, pobj, dobj, ρ, piter, ppass, pstat, citer, cpass, cstat, dmin, dmax, χ) = defaultrow(s.hist)
-    μt = s.settings.relax_tol   # barrier target μ′; 0 = exact solve
+    (; pres, dres, pobj, dobj, step, piter, ppass, pstat, citer, cpass, cstat, dmin, dmax, ρ, δ, μ, χ) = defaultrow(s.hist)
+
+    μt = s.μ   # barrier target μ′; 0 = exact solve
+    #
+    # choose augmentation parameter δ
+    #
+    δ = getaug(s)
 
     w = s.wrk
     #
@@ -656,12 +661,7 @@ function step!(s::IPMSolver)
         elseif isstalled(s)
             status = nearstatus(s, STALLED, μ, μs, pobj, dobj, pres, dres)
         elseif iszero(s.ν)
-            #
-            # choose augmentation parameter δ
-            #
-            setaug!(s)
-
-            initok, ρ = @timeit s.timers "initkkt" initkkt!(s)
+            initok, ρ = @timeit s.timers "initkkt" initkkt!(s, δ)
 
             if !initok
                 if s.settings.verbose > 1
@@ -688,12 +688,7 @@ function step!(s::IPMSolver)
 
             status = nearstatus(s, NUMERICAL_FAILURE, μ, μs, pobj, dobj, pres, dres)
         else
-            #
-            # choose augmentation parameter δ
-            #
-            setaug!(s)
-
-            initok, ρ = @timeit s.timers "initkkt" initkkt!(s)
+            initok, ρ = @timeit s.timers "initkkt" initkkt!(s, δ)
 
             if !initok
                 if s.settings.verbose > 1
@@ -772,8 +767,8 @@ function step!(s::IPMSolver)
         end
     end
 
-    push!(s.hist, (; μ, step, pres, dres, pobj, dobj, ρ, δ=s.δ[], piter, ppass, pstat, citer, cpass, cstat,
-        dmin, dmax, χ))
+    push!(s.hist, (; pres, dres, pobj, dobj, step, piter, ppass, pstat, citer, cpass, cstat,
+        dmin, dmax, ρ, δ, μ, χ))
 
     return status
 end

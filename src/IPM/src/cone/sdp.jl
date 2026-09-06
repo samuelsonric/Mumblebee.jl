@@ -11,17 +11,6 @@ struct SemidefiniteCone <: AbstractCone end
 # only ever short — never over — by at most this bracket.
 const TRIDIAG_TOL = 1e-6
 
-# SDP workspace layout in data (d = triroot(n)):
-#   sdpscale!:              2 d²       (P, D; the SVD runs in place in the R cache)
-#   sdpcorr!:               3 d²       (ΔP, ΔD, W)
-#   sdpmaxstep tridiag:     2 d² + 2 d   (α doubles as the tridiag scratch)
-# The bound is max(3 d², 2 d² + 2 d): sdpcorr! wins for d ≥ 2, the tridiag
-# maxstep only at d = 1.
-function workspacesize(::Type{SemidefiniteCone}, n::Integer)
-    d = triroot(n)
-    return max(3d^2, 2d^2 + 2d)
-end
-
 struct SemidefiniteConeCache{T} <: AbstractCache{SemidefiniteCone}
     cone::SemidefiniteCone
     #
@@ -49,6 +38,109 @@ function roottwo(::Type{T}) where {T}
     return sqrt(two(T))
 end
 
+############################################################################################
+# degree
+############################################################################################
+
+function degree(::SemidefiniteCone, n::Integer)
+    return triroot(n)
+end
+
+############################################################################################
+# cachesize
+############################################################################################
+
+function cachesize(::Type{SemidefiniteCone}, n::Integer)
+    d = triroot(n)
+    return 2d^2 + d  # R, S (d² each) + s (d)
+end
+
+############################################################################################
+# workspacesize
+############################################################################################
+
+# SDP workspace layout in data (d = triroot(n)):
+#   sdpscale!:              2 d²       (P, D; the SVD runs in place in the R cache)
+#   sdpcorr!:               3 d²       (ΔP, ΔD, W)
+#   sdpmaxstep tridiag:     2 d² + 2 d   (α doubles as the tridiag scratch)
+# The bound is max(3 d², 2 d² + 2 d): sdpcorr! wins for d ≥ 2, the tridiag
+# maxstep only at d = 1.
+function workspacesize(::Type{SemidefiniteCone}, n::Integer)
+    d = triroot(n)
+    return max(3d^2, 2d^2 + 2d)
+end
+
+############################################################################################
+# cache
+############################################################################################
+
+function cache(c::Caches, i::Integer, cone::SemidefiniteCone)
+    n = c.xcol[i + 1] - c.xcol[i]
+    d = triroot(n)
+
+    data = cachedata(c, i)
+
+    R  = reshape(view(data, 0d^2 + 1:1d^2      ), d, d)
+    S  = reshape(view(data, 1d^2 + 1:2d^2      ), d, d)
+    s  =         view(data, 2d^2 + 1:2d^2 +  d)
+
+    SemidefiniteConeCache(cone, R, S, s)
+end
+
+############################################################################################
+# identity!
+############################################################################################
+
+function identity!(x::AbstractVector, ::SemidefiniteCone)
+    return sdpid!(x)
+end
+
+# construct the identity matrix
+#
+#   I
+#
+function sdpid!(x::AbstractVector{T}) where {T}
+    d = triroot(length(x))
+    k = 1
+
+    fill!(x, zero(T))
+
+    for j in 1:d
+        x[k] = one(T); k += d - j + 1
+    end
+
+    return x
+end
+
+############################################################################################
+# scale!
+############################################################################################
+
+function scale!(H::AbstractMatrix{T}, p::AbstractVector{T}, d::AbstractVector{T}, cache::SemidefiniteConeCache{T}, work::ConeWorkspace{T}) where {T}
+    return sdpscale!(H, cache.R, cache.S, cache.s, p, d, work)
+end
+
+function sdpscale!(
+        H::AbstractMatrix{T},
+        R::AbstractMatrix{T},
+        S::AbstractMatrix{T},
+        s::AbstractVector{T},
+        p::AbstractVector,
+        d::AbstractVector,
+        work::ConeWorkspace{T},
+    ) where {T}
+    n = size(R, 1)
+    n == 1 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(1))
+    n == 2 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(2))
+    n == 3 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(3))
+    n == 4 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(4))
+    n == 5 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(5))
+    n == 6 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(6))
+    n == 7 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(7))
+    n == 8 && return sdpscalestatic!(H, R, S, s, p, d, work, Val(8))
+    return sdpscaledynamic!(H, R, S, s, p, d, work)
+end
+
 # compute the symmetric Kronecker product
 #
 #   H = W⁻¹ ⊗ W⁻¹
@@ -65,12 +157,12 @@ function sdpscalestatic!(
         s::AbstractVector{T},
         p::AbstractVector,
         d::AbstractVector,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
         ::Val{N},
     ) where {T, N}
     m = N * N
-    P = reshape(view(wrk.data, 0m + 1:1m), N, N)   # chol(smat p); reused for Y after S
-    D = reshape(view(wrk.data, 1m + 1:2m), N, N)   # chol(smat d); → W
+    P = reshape(view(work.data, 0m + 1:1m), N, N)   # chol(smat p); reused for Y after S
+    D = reshape(view(work.data, 1m + 1:2m), N, N)   # chol(smat d); → W
 
     @inbounds smatstatic!(P, p, Val(N))
     @inbounds smatstatic!(D, d, Val(N))
@@ -122,12 +214,12 @@ function sdpscaledynamic!(
         s::AbstractVector{T},
         p::AbstractVector,
         d::AbstractVector,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
     n = size(R, 1); m = n * n
 
-    P = reshape(view(wrk.data, 0m + 1:1m), n, n)   # chol(smat p); reused for Y after S
-    D = reshape(view(wrk.data, 1m + 1:2m), n, n)   # chol(smat d); → W
+    P = reshape(view(work.data, 0m + 1:1m), n, n)   # chol(smat p); reused for Y after S
+    D = reshape(view(work.data, 1m + 1:2m), n, n)   # chol(smat d); → W
 
     smat!(P, p)
     smat!(D, d)
@@ -172,25 +264,21 @@ function sdpscaledynamic!(
     return true, spsd
 end
 
-function sdpscale!(
-        H::AbstractMatrix{T},
-        R::AbstractMatrix{T},
-        S::AbstractMatrix{T},
-        s::AbstractVector{T},
-        p::AbstractVector,
-        d::AbstractVector,
-        wrk::ConeWorkspace{T},
+############################################################################################
+# corr!
+############################################################################################
+
+function corr!(
+        r::AbstractVector{T},
+        ::AbstractVector{T},
+        ::AbstractVector{T},
+        Δp::AbstractVector{T},
+        Δd::AbstractVector{T},
+        σμ::Real,
+        cache::SemidefiniteConeCache{T},
+        work::ConeWorkspace{T},
     ) where {T}
-    n = size(R, 1)
-    n == 1 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(1))
-    n == 2 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(2))
-    n == 3 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(3))
-    n == 4 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(4))
-    n == 5 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(5))
-    n == 6 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(6))
-    n == 7 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(7))
-    n == 8 && return sdpscalestatic!(H, R, S, s, p, d, wrk, Val(8))
-    return sdpscaledynamic!(H, R, S, s, p, d, wrk)
+    return sdpcorr!(r, cache.R, cache.S, cache.s, Δp, Δd, σμ, work)
 end
 
 # The SDP Mehrotra corrector. With R = LP⁻ᵀU, S = LP U (= R⁻ᵀ) and Σ = s cached,
@@ -212,19 +300,19 @@ function sdpcorr!(
         Δp::AbstractVector{T},
         Δd::AbstractVector{T},
         σμ::Real,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
     n = size(R, 1)
 
-    n == 1 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(1))
-    n == 2 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(2))
-    n == 3 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(3))
-    n == 4 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(4))
-    n == 5 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(5))
-    n == 6 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(6))
-    n == 7 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(7))
-    n == 8 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, wrk, Val(8))
-    return sdpcorrdynamic!(r, R, S, s, Δp, Δd, σμ, wrk)
+    n == 1 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(1))
+    n == 2 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(2))
+    n == 3 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(3))
+    n == 4 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(4))
+    n == 5 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(5))
+    n == 6 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(6))
+    n == 7 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(7))
+    n == 8 && return sdpcorrstatic!(r, R, S, s, Δp, Δd, σμ, work, Val(8))
+    return sdpcorrdynamic!(r, R, S, s, Δp, Δd, σμ, work)
 end
 
 function sdpcorrstatic!(
@@ -235,14 +323,14 @@ function sdpcorrstatic!(
         Δp::AbstractVector{T},
         Δd::AbstractVector{T},
         σμ::Real,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
         ::Val{N},
     ) where {T, N}
     m = N * N
 
-    ΔP = reshape(view(wrk.data, 0m + 1:1m), N, N)
-    ΔD = reshape(view(wrk.data, 1m + 1:2m), N, N)
-    W  = reshape(view(wrk.data, 2m + 1:3m), N, N)   # intermediate, then A·B, then Ŵ, then R Ŵ Rᵀ
+    ΔP = reshape(view(work.data, 0m + 1:1m), N, N)
+    ΔD = reshape(view(work.data, 1m + 1:2m), N, N)
+    W  = reshape(view(work.data, 2m + 1:3m), N, N)   # intermediate, then A·B, then Ŵ, then R Ŵ Rᵀ
 
     @inbounds smatstatic!(ΔP, Δp, Val(N))
     @inbounds smatstatic!(ΔD, Δd, Val(N))
@@ -293,13 +381,13 @@ function sdpcorrdynamic!(
         Δp::AbstractVector{T},
         Δd::AbstractVector{T},
         σμ::Real,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
     n = size(R, 1); m = n * n
 
-    ΔP = reshape(view(wrk.data, 0m + 1:1m), n, n)
-    ΔD = reshape(view(wrk.data, 1m + 1:2m), n, n)
-    W  = reshape(view(wrk.data, 2m + 1:3m), n, n)   # intermediate, then A·B, then Ŵ, then R Ŵ Rᵀ
+    ΔP = reshape(view(work.data, 0m + 1:1m), n, n)
+    ΔD = reshape(view(work.data, 1m + 1:2m), n, n)
+    W  = reshape(view(work.data, 2m + 1:3m), n, n)   # intermediate, then A·B, then Ŵ, then R Ŵ Rᵀ
 
     smat!(ΔP, Δp)
     smat!(ΔD, Δd)
@@ -344,25 +432,33 @@ function sdpcorrdynamic!(
     return r
 end
 
+############################################################################################
+# corr0!
+############################################################################################
+
+function corr0!(r::AbstractVector{T}, ::AbstractVector{T}, ::AbstractVector{T}, σμ::Real, cache::SemidefiniteConeCache{T}, work::ConeWorkspace{T}) where {T}
+    return sdpcorr0!(r, cache.R, cache.s, σμ, work)
+end
+
 # sdpcorr! with Δp = Δd = 0.
 function sdpcorr0!(
         r::AbstractVector{T},
         R::AbstractMatrix{T},
         s::AbstractVector{T},
         σμ::Real,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
     n = size(R, 1)
 
-    n == 1 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(1))
-    n == 2 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(2))
-    n == 3 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(3))
-    n == 4 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(4))
-    n == 5 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(5))
-    n == 6 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(6))
-    n == 7 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(7))
-    n == 8 && return sdpcorr0static!(r, R, s, σμ, wrk, Val(8))
-    return sdpcorr0dynamic!(r, R, s, σμ, wrk)
+    n == 1 && return sdpcorr0static!(r, R, s, σμ, work, Val(1))
+    n == 2 && return sdpcorr0static!(r, R, s, σμ, work, Val(2))
+    n == 3 && return sdpcorr0static!(r, R, s, σμ, work, Val(3))
+    n == 4 && return sdpcorr0static!(r, R, s, σμ, work, Val(4))
+    n == 5 && return sdpcorr0static!(r, R, s, σμ, work, Val(5))
+    n == 6 && return sdpcorr0static!(r, R, s, σμ, work, Val(6))
+    n == 7 && return sdpcorr0static!(r, R, s, σμ, work, Val(7))
+    n == 8 && return sdpcorr0static!(r, R, s, σμ, work, Val(8))
+    return sdpcorr0dynamic!(r, R, s, σμ, work)
 end
 
 function sdpcorr0static!(
@@ -370,13 +466,13 @@ function sdpcorr0static!(
         R::AbstractMatrix{T},
         s::AbstractVector{T},
         σμ::Real,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
         ::Val{N},
     ) where {T, N}
     m = N * N
 
-    ΔP = reshape(view(wrk.data, 0m + 1:1m), N, N)
-    W  = reshape(view(wrk.data, 2m + 1:3m), N, N)
+    ΔP = reshape(view(work.data, 0m + 1:1m), N, N)
+    W  = reshape(view(work.data, 2m + 1:3m), N, N)
 
     @inbounds for j in 1:N
         for i in 1:N
@@ -400,12 +496,12 @@ function sdpcorr0dynamic!(
         R::AbstractMatrix{T},
         s::AbstractVector{T},
         σμ::Real,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
     n = size(R, 1); m = n * n
 
-    ΔP = reshape(view(wrk.data, 0m + 1:1m), n, n)
-    W  = reshape(view(wrk.data, 2m + 1:3m), n, n)
+    ΔP = reshape(view(work.data, 0m + 1:1m), n, n)
+    W  = reshape(view(work.data, 2m + 1:3m), n, n)
 
     fill!(W, zero(T))
 
@@ -418,6 +514,16 @@ function sdpcorr0dynamic!(
 
     svec!(r, W)
     return r
+end
+
+############################################################################################
+# maxsteps
+############################################################################################
+
+function maxsteps(::AbstractVector{T}, Δp::AbstractVector{T}, ::AbstractVector{T}, Δd::AbstractVector{T}, cache::SemidefiniteConeCache{T}, work::ConeWorkspace{T}) where {T}
+    τp = sdpmaxstep(cache.R, Δp, nothing, work)
+    τd = sdpmaxstep(cache.S, Δd, cache.s, work)
+    return τp, τd
 end
 
 # Find the largest number 0 < τ ≤ 1 such that
@@ -434,23 +540,6 @@ end
 #   τ⁻¹ = max {1, -λ},
 #
 # where λ is the smallest eigenvalue of L⁻¹ ΔX L⁻ᵀ.
-# construct the identity matrix
-#
-#   I
-#
-function sdpid!(x::AbstractVector{T}) where {T}
-    d = triroot(length(x))
-    k = 1
-
-    fill!(x, zero(T))
-
-    for j in 1:d
-        x[k] = one(T); k += d - j + 1
-    end
-
-    return x
-end
-
 #
 # Tiered step-length computation: dispatch by matrix size. The step matrix M is
 # an orthogonal congruence of the factor F (F = R for τp, F = S for τd), plus a
@@ -461,11 +550,24 @@ end
 #                   Householder tridiagonalization + Sturm bisection (n ≥ 4)
 # n ≥ 9:            dynamic congruence + tridiagonalization + Sturm
 #
+function sdpmaxstep(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}) where {T}
+    n = size(F, 1)
 
-function sdpmaxstepstatic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, wrk::ConeWorkspace{T}, ::Val{N}) where {T, N}
+    n == 1 && return sdpmaxstepstatic(F, Δx, scale, work, Val(1))
+    n == 2 && return sdpmaxstepstatic(F, Δx, scale, work, Val(2))
+    n == 3 && return sdpmaxstepstatic(F, Δx, scale, work, Val(3))
+    n == 4 && return sdpmaxstepstatic(F, Δx, scale, work, Val(4))
+    n == 5 && return sdpmaxstepstatic(F, Δx, scale, work, Val(5))
+    n == 6 && return sdpmaxstepstatic(F, Δx, scale, work, Val(6))
+    n == 7 && return sdpmaxstepstatic(F, Δx, scale, work, Val(7))
+    n == 8 && return sdpmaxstepstatic(F, Δx, scale, work, Val(8))
+    return sdpmaxstepdynamic(F, Δx, scale, work)
+end
+
+function sdpmaxstepstatic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}, ::Val{N}) where {T, N}
     m = N * N
-    M   = reshape(view(wrk.data, 0m + 1:1m), N, N)
-    tmp = reshape(view(wrk.data, 1m + 1:2m), N, N)
+    M   = reshape(view(work.data, 0m + 1:1m), N, N)
+    tmp = reshape(view(work.data, 1m + 1:2m), N, N)
 
     @inbounds smatstatic!(M, Δx, Val(N))
     @inbounds symmstatic!(M, Val(N))
@@ -485,8 +587,8 @@ function sdpmaxstepstatic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, w
     if N ≤ 3
         @inbounds λ = eigminstatic(M, Val(N))
     else
-        α = view(wrk.data, 2m + 0N + 1:2m + 1N)
-        β = view(wrk.data, 2m + 1N + 1:2m + 2N)
+        α = view(work.data, 2m + 0N + 1:2m + 1N)
+        β = view(work.data, 2m + 1N + 1:2m + 2N)
         @inbounds λ = eigminsturm!(M, α, β, T(TRIDIAG_TOL), -one(T))
     end
 
@@ -497,14 +599,14 @@ end
 # bisection. Sturm counting makes `lo` a certified lower bound on λmin, so —
 # unlike the old Kato-Temple/Lanczos path — no Cholesky feasibility gate exists.
 # Beats LAPACK dsyevr at every size measured (to n=64+), so there is no dense tier.
-function sdpmaxstepdynamic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, wrk::ConeWorkspace{T}; tol::T = T(TRIDIAG_TOL)) where {T}
+function sdpmaxstepdynamic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}; tol::T = T(TRIDIAG_TOL)) where {T}
     n = size(F, 1)
 
     o = 0
-    M   = reshape(view(wrk.data, o + 1:o + n * n), n, n); o += n * n
-    tmp = reshape(view(wrk.data, o + 1:o + n * n), n, n); o += n * n
-    α =         view(wrk.data, o + 1:o + n);              o += n
-    β =         view(wrk.data, o + 1:o + n)
+    M   = reshape(view(work.data, o + 1:o + n * n), n, n); o += n * n
+    tmp = reshape(view(work.data, o + 1:o + n * n), n, n); o += n * n
+    α =         view(work.data, o + 1:o + n);              o += n
+    β =         view(work.data, o + 1:o + n)
     #
     # M = Fᵀ ΔX F (+ Σ⁻¹·Σ⁻¹ for the dual): ΔX built in M, congruence via tmp
     #
@@ -524,83 +626,23 @@ function sdpmaxstepdynamic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, 
     return inv(max(one(T), -λ))
 end
 
-# Dispatcher
-function sdpmaxstep(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, wrk::ConeWorkspace{T}) where {T}
-    n = size(F, 1)
+############################################################################################
+# dualshadow! / primalshadow!
+############################################################################################
 
-    n == 1 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(1))
-    n == 2 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(2))
-    n == 3 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(3))
-    n == 4 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(4))
-    n == 5 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(5))
-    n == 6 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(6))
-    n == 7 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(7))
-    n == 8 && return sdpmaxstepstatic(F, Δx, scale, wrk, Val(8))
-    return sdpmaxstepdynamic(F, Δx, scale, wrk)
+function dualshadow!(sd::AbstractVector, p::AbstractVector, ::SemidefiniteConeCache, work::ConeWorkspace)
+    return sdpshadow!(sd, p, work)
 end
 
-#
-# AbstractCone Interface
-#
-
-function degree(::SemidefiniteCone, n::Integer)
-    return triroot(n)
+function primalshadow!(sp::AbstractVector, d::AbstractVector, ::SemidefiniteConeCache, work::ConeWorkspace)
+    return sdpshadow!(sp, d, work)
 end
 
-function cachesize(::Type{SemidefiniteCone}, n::Integer)
-    d = triroot(n)
-    return 2d^2 + d  # R, S (d² each) + s (d)
-end
-
-function cache(c::Caches, i::Integer, cone::SemidefiniteCone)
-    n = c.xcol[i + 1] - c.xcol[i]
-    d = triroot(n)
-
-    data = cachedata(c, i)
-
-    R  = reshape(view(data, 0d^2 + 1:1d^2      ), d, d)
-    S  = reshape(view(data, 1d^2 + 1:2d^2      ), d, d)
-    s  =         view(data, 2d^2 + 1:2d^2 +  d)
-
-    SemidefiniteConeCache(cone, R, S, s)
-end
-
-function identity!(x::AbstractVector, ::SemidefiniteCone)
-    return sdpid!(x)
-end
-
-function scale!(H::AbstractMatrix{T}, p::AbstractVector{T}, d::AbstractVector{T}, cache::SemidefiniteConeCache{T}, wrk::ConeWorkspace{T}) where {T}
-    return sdpscale!(H, cache.R, cache.S, cache.s, p, d, wrk)
-end
-
-function corr!(
-        r::AbstractVector{T},
-        ::AbstractVector{T},
-        ::AbstractVector{T},
-        Δp::AbstractVector{T},
-        Δd::AbstractVector{T},
-        σμ::Real,
-        cache::SemidefiniteConeCache{T},
-        wrk::ConeWorkspace{T},
-    ) where {T}
-    return sdpcorr!(r, cache.R, cache.S, cache.s, Δp, Δd, σμ, wrk)
-end
-
-function corr0!(r::AbstractVector{T}, ::AbstractVector{T}, ::AbstractVector{T}, σμ::Real, cache::SemidefiniteConeCache{T}, wrk::ConeWorkspace{T}) where {T}
-    return sdpcorr0!(r, cache.R, cache.s, σμ, wrk)
-end
-
-function maxsteps(::AbstractVector{T}, Δp::AbstractVector{T}, ::AbstractVector{T}, Δd::AbstractVector{T}, cache::SemidefiniteConeCache{T}, wrk::ConeWorkspace{T}) where {T}
-    τp = sdpmaxstep(cache.R, Δp, nothing, wrk)
-    τd = sdpmaxstep(cache.S, Δd, cache.s, wrk)
-    return τp, τd
-end
-
-function sdpshadow!(s::AbstractVector{T}, x::AbstractVector{T}, wrk::ConeWorkspace{T}) where {T}
+function sdpshadow!(s::AbstractVector{T}, x::AbstractVector{T}, work::ConeWorkspace{T}) where {T}
     d = triroot(length(x))
 
-    M = reshape(view(wrk.data, 0d^2 + 1:1d^2), d, d)
-    Z = reshape(view(wrk.data, 1d^2 + 1:2d^2), d, d)
+    M = reshape(view(work.data, 0d^2 + 1:1d^2), d, d)
+    Z = reshape(view(work.data, 1d^2 + 1:2d^2), d, d)
 
     d == 1 && return sdpshadowstatic!(s, x, M, Z, Val(1))
     d == 2 && return sdpshadowstatic!(s, x, M, Z, Val(2))
@@ -642,10 +684,140 @@ function sdpshadowdynamic!(s::AbstractVector{T}, x::AbstractVector{T}, M::Abstra
     return true
 end
 
-function dualshadow!(sd::AbstractVector, p::AbstractVector, ::SemidefiniteConeCache, wrk::ConeWorkspace)
-    return sdpshadow!(sd, p, wrk)
+############################################################################################
+# primalhess!
+############################################################################################
+
+# F = −log det X, X = smat(p). Cached R satisfies R Rᵀ = X⁻¹, so with Ũ = RᵀUR, Ṽ = RᵀVR
+# (U = smat u, V = smat v):
+#   F″[u]    = svec(R Ũ Rᵀ)
+#   ∇³F[u,v] = −svec(R (ŨṼ + ṼŨ) Rᵀ) = −svec(R (ŨṼ + (ŨṼ)ᵀ) Rᵀ)
+function primalhess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, cache::SemidefiniteConeCache, work::ConeWorkspace)
+    return sdphess!(r, p, Δp, cache.R, work)
 end
 
-function primalshadow!(sp::AbstractVector, d::AbstractVector, ::SemidefiniteConeCache, wrk::ConeWorkspace)
-    return sdpshadow!(sp, d, wrk)
+function sdphess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, R::AbstractMatrix, work::ConeWorkspace)
+    d = triroot(length(p))
+    d == 1 && return sdphessstatic!(r, Δp, R, work, Val(1))
+    d == 2 && return sdphessstatic!(r, Δp, R, work, Val(2))
+    d == 3 && return sdphessstatic!(r, Δp, R, work, Val(3))
+    d == 4 && return sdphessstatic!(r, Δp, R, work, Val(4))
+    d == 5 && return sdphessstatic!(r, Δp, R, work, Val(5))
+    d == 6 && return sdphessstatic!(r, Δp, R, work, Val(6))
+    d == 7 && return sdphessstatic!(r, Δp, R, work, Val(7))
+    d == 8 && return sdphessstatic!(r, Δp, R, work, Val(8))
+    return sdphessdynamic!(r, Δp, R, work)
+end
+
+function sdphessstatic!(r, Δp, R, work, ::Val{N}) where {N}
+    m = N * N
+    U = reshape(view(work.data, 0m + 1:1m), N, N)
+    A = reshape(view(work.data, 1m + 1:2m), N, N)
+
+    @inbounds smatstatic!(U, Δp, Val(N))
+    @inbounds symmstatic!(U, Val(N))
+    @inbounds mulstatic!(A, R', U, Val(N))
+    @inbounds mulstatic!(U, A, R, Val(N))                 # U = Ũ = RᵀUR
+    @inbounds mulstatic!(A, R, U, Val(N))
+    @inbounds mulstatic!(U, A, R', Val(N))                # U = R Ũ Rᵀ
+    @inbounds svecstatic!(r, U, Val(N))
+    return r
+end
+
+function sdphessdynamic!(r, Δp, R, work)
+    n = size(R, 1); m = n * n
+    U = reshape(view(work.data, 0m + 1:1m), n, n)
+    A = reshape(view(work.data, 1m + 1:2m), n, n)
+
+    smat!(U, Δp)
+    symmetrize!(U)
+    mul!(A, R', U)
+    mul!(U, A, R)                                         # U = Ũ = RᵀUR
+    mul!(A, R, U)
+    mul!(U, A, R')                                        # U = R Ũ Rᵀ
+    svec!(r, U)
+    return r
+end
+
+############################################################################################
+# primalthird!
+############################################################################################
+
+function primalthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector, cache::SemidefiniteConeCache, work::ConeWorkspace)
+    return sdpthird!(r, p, Δp1, Δp2, cache.R, work)
+end
+
+function sdpthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector, R::AbstractMatrix, work::ConeWorkspace)
+    d = triroot(length(p))
+    d == 1 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(1))
+    d == 2 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(2))
+    d == 3 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(3))
+    d == 4 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(4))
+    d == 5 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(5))
+    d == 6 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(6))
+    d == 7 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(7))
+    d == 8 && return sdpthirdstatic!(r, Δp1, Δp2, R, work, Val(8))
+    return sdpthirddynamic!(r, Δp1, Δp2, R, work)
+end
+
+function sdpthirdstatic!(r, Δp1, Δp2, R, work, ::Val{N}) where {N}
+    m = N * N
+    U = reshape(view(work.data, 0m + 1:1m), N, N)
+    V = reshape(view(work.data, 1m + 1:2m), N, N)
+    A = reshape(view(work.data, 2m + 1:3m), N, N)
+
+    @inbounds smatstatic!(U, Δp1, Val(N))
+    @inbounds symmstatic!(U, Val(N))
+    @inbounds smatstatic!(V, Δp2, Val(N))
+    @inbounds symmstatic!(V, Val(N))
+    @inbounds mulstatic!(A, R', U, Val(N))
+    @inbounds mulstatic!(U, A, R, Val(N))                 # U = Ũ
+    @inbounds mulstatic!(A, R', V, Val(N))
+    @inbounds mulstatic!(V, A, R, Val(N))                 # V = Ṽ
+    @inbounds mulstatic!(A, U, V, Val(N))                 # A = ŨṼ
+
+    @inbounds for i in 1:N                                # A ← ŨṼ + (ŨṼ)ᵀ = ŨṼ + ṼŨ
+        A[i, i] *= 2
+
+        for j in i + 1:N
+            A[i, j] = A[j, i] = A[i, j] + A[j, i]
+        end
+    end
+
+    @inbounds mulstatic!(U, R, A, Val(N))
+    @inbounds mulstatic!(A, U, R', Val(N))                # A = R(ŨṼ+ṼŨ)Rᵀ
+    @inbounds svecstatic!(r, A, Val(N))
+    rmul!(r, -1)
+    return r
+end
+
+function sdpthirddynamic!(r, Δp1, Δp2, R, work)
+    n = size(R, 1); m = n * n
+    U = reshape(view(work.data, 0m + 1:1m), n, n)
+    V = reshape(view(work.data, 1m + 1:2m), n, n)
+    A = reshape(view(work.data, 2m + 1:3m), n, n)
+
+    smat!(U, Δp1)
+    symmetrize!(U)
+    smat!(V, Δp2)
+    symmetrize!(V)
+    mul!(A, R', U)
+    mul!(U, A, R)                                         # U = Ũ
+    mul!(A, R', V)
+    mul!(V, A, R)                                         # V = Ṽ
+    mul!(A, U, V)                                         # A = ŨṼ
+
+    @inbounds for i in 1:n                                # A ← ŨṼ + (ŨṼ)ᵀ = ŨṼ + ṼŨ
+        A[i, i] *= 2
+
+        for j in i + 1:n
+            A[i, j] = A[j, i] = A[i, j] + A[j, i]
+        end
+    end
+
+    mul!(U, R, A)
+    mul!(A, U, R')                                        # A = R(ŨṼ+ṼŨ)Rᵀ
+    svec!(r, A)
+    rmul!(r, -1)
+    return r
 end

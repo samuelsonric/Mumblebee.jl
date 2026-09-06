@@ -195,7 +195,7 @@ function build_obstacle(L::Int)
 
     cones = IPM.AbstractCone[PositiveCone() for _ in 1:n]
 
-    return IPMProblem(Q, B, c, Float64[], cones)
+    return IPMProblem(Q, B, c, Float64[], 0.0, cones)
 end
 
 function build_obstacle_jump(L::Int; optimizer)

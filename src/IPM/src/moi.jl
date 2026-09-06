@@ -422,7 +422,7 @@ function MOI.copy_to(dest::Optimizer{T}, src::MOI.ModelLike) where {T}
     dest.umap = umap
     dest.sense = sense
     dest.objconst = objconst
-    dest.problem = IPMProblem(Q, B, f, g, K, s; compress = dest.compress)
+    dest.problem = IPMProblem(Q, B, f, g, zero(T), K, s; compress = dest.compress)
     return MOI.Utilities.identity_index_map(src)
 end
 

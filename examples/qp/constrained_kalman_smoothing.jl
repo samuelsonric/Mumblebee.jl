@@ -177,7 +177,7 @@ function build_kalman_smoother(m::SplineModel; bound::Float64 = 1.0)
     cones = vcat(IPM.AbstractCone[CofreeCone() for _ in 1:N],
                  IPM.AbstractCone[PositiveCone() for _ in 1:N])
 
-    return IPMProblem(Q, B, c, g, cones)
+    return IPMProblem(Q, B, c, g, 0.0, cones)
 end
 
 function build_ks_jump(m::SplineModel; bound::Float64, optimizer)

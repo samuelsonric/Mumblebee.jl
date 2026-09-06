@@ -15,7 +15,6 @@
     elim_alg::E = DEFAULT_ELIMINATION_ALGORITHM   # KKT elimination ordering (construction-time)
     infeas_abs::T = 1e-8
     infeas_rel::T = 1e-8
-    relax_tol::T = 0.0          # barrier target μ′; converge to the central-path point x*(μ′) instead of the optimum. gap = degree(K)·relax_tol. 0 = exact solve
 end
 
 function IPMSettings{T}(; elim_alg::E = DEFAULT_ELIMINATION_ALGORITHM, kwargs...) where {T, E <: EliminationAlgorithm}
@@ -40,6 +39,5 @@ function showsettings(io::IO, set::IPMSettings; indent::Integer=0)
     @printf(io, "%sscale_max_iter:%7d  refine_max_iter: %6d\n", pad, set.scale_max_iter, set.refine_max_iter)
     @printf(io, "%snewton_max_iter:%6d  aug_tol:       %8.2e\n", pad, set.newton_max_iter, set.aug_tol)
     @printf(io, "%sinfeas_abs:   %8.2e  infeas_rel:    %8.2e\n", pad, set.infeas_abs, set.infeas_rel)
-    @printf(io, "%srelax_tol:    %8.2e\n", pad, set.relax_tol)
     return
 end

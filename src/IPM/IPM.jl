@@ -40,7 +40,7 @@ include("src/moi.jl")
 
 export IPMProblem, IPMSettings, IPMSolver, IPMResult, IPMHistory, IPMHistoryRow, IPMStatus
 export OPTIMAL, NEAR_OPTIMAL, STALLED, NUMERICAL_FAILURE, ITERATION_LIMIT, PRIMAL_INFEASIBLE, DUAL_INFEASIBLE, ILL_POSED, NEAR_PRIMAL_INFEASIBLE, NEAR_DUAL_INFEASIBLE, NEAR_ILL_POSED
-export solve, solve!, step!, init
+export solve, solve!, step!, init, frule!, frule2!, rrule!
 export AbstractCone, SemidefiniteCone, PositiveCone, SecondOrderCone, CofreeCone, ExponentialCone
 export print_timers
 

@@ -321,7 +321,7 @@ function build_snl(inst::SNLInstance)
     append!(cones, IPM.AbstractCone[SemidefiniteCone() for _ in 1:nE])
     append!(cones, IPM.AbstractCone[PositiveCone() for _ in 1:(nE + nA)])
 
-    return IPMProblem(Q, B, c, g, cones), B
+    return IPMProblem(Q, B, c, g, 0.0, cones), B
 end
 
 function build_snl_jump(inst::SNLInstance; optimizer)

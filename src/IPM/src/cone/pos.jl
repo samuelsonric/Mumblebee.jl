@@ -13,6 +13,38 @@ function PositiveConeCache()
     return PositiveConeCache(PositiveCone())
 end
 
+############################################################################################
+# degree
+############################################################################################
+
+function degree(::PositiveCone, n::Integer)
+    return n
+end
+
+############################################################################################
+# cachesize
+############################################################################################
+
+function cachesize(::Type{PositiveCone}, n::Integer)
+    return 0
+end
+
+############################################################################################
+# cache
+############################################################################################
+
+function cache(::Caches, ::Integer, c::PositiveCone)
+    return PositiveConeCache(c)
+end
+
+############################################################################################
+# identity!
+############################################################################################
+
+function identity!(x::AbstractVector, ::PositiveCone)
+    return posid!(x)
+end
+
 # construct the ones vector
 #
 #   e = (1, …, 1)
@@ -20,6 +52,14 @@ end
 function posid!(x::AbstractVector)
     fill!(x, true)
     return x
+end
+
+############################################################################################
+# scale!
+############################################################################################
+
+function scale!(H::AbstractMatrix, p::AbstractVector, d::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
+    return posscale!(H, p, d)
 end
 
 # construct the diagonal scaling matrix
@@ -43,6 +83,23 @@ function posscale!(H::AbstractMatrix, p::AbstractVector{T}, d::AbstractVector) w
     return true, spsd
 end
 
+############################################################################################
+# corr!
+############################################################################################
+
+function corr!(
+        r::AbstractVector,
+        p::AbstractVector,
+        d::AbstractVector,
+        Δp::AbstractVector,
+        Δd::AbstractVector,
+        σμ::Real,
+        ::PositiveConeCache,
+        ::ConeWorkspace,
+    )
+    return poscorr!(r, p, d, Δp, Δd, σμ)
+end
+
 # Compute the corrector term
 #
 #   rᵢ = (σμ - Δpᵢ Δdᵢ) / pᵢ - dᵢ.
@@ -62,6 +119,14 @@ function poscorr!(
     return r
 end
 
+############################################################################################
+# corr0!
+############################################################################################
+
+function corr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ::Real, ::PositiveConeCache, ::ConeWorkspace)
+    return poscorr0!(r, p, d, σμ)
+end
+
 # poscorr! with Δp = Δd = 0.
 function poscorr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ::Real)
     for i in eachindex(r)
@@ -69,6 +134,14 @@ function poscorr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ
     end
 
     return r
+end
+
+############################################################################################
+# maxsteps
+############################################################################################
+
+function maxsteps(p::AbstractVector, Δp::AbstractVector, d::AbstractVector, Δd::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
+    return posmaxstep(p, Δp), posmaxstep(d, Δd)
 end
 
 # Find the largest number 0 < τ ≤ 1 such that
@@ -93,49 +166,16 @@ function posmaxstep(x::AbstractVector{T}, Δx::AbstractVector{T}) where {T}
     return τ
 end
 
-#
-# AbstractCone Interface
-#
+############################################################################################
+# dualshadow! / primalshadow!
+############################################################################################
 
-function degree(::PositiveCone, n::Integer)
-    return n
+function dualshadow!(sd::AbstractVector, p::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
+    return posshadow!(sd, p)
 end
 
-function cachesize(::Type{PositiveCone}, n::Integer)
-    return 0
-end
-
-function cache(::Caches, ::Integer, c::PositiveCone)
-    return PositiveConeCache(c)
-end
-
-function identity!(x::AbstractVector, ::PositiveCone)
-    return posid!(x)
-end
-
-function scale!(H::AbstractMatrix, p::AbstractVector, d::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
-    return posscale!(H, p, d)
-end
-
-function corr!(
-        r::AbstractVector,
-        p::AbstractVector,
-        d::AbstractVector,
-        Δp::AbstractVector,
-        Δd::AbstractVector,
-        σμ::Real,
-        ::PositiveConeCache,
-        ::ConeWorkspace,
-    )
-    return poscorr!(r, p, d, Δp, Δd, σμ)
-end
-
-function corr0!(r::AbstractVector, p::AbstractVector, d::AbstractVector, σμ::Real, ::PositiveConeCache, ::ConeWorkspace)
-    return poscorr0!(r, p, d, σμ)
-end
-
-function maxsteps(p::AbstractVector, Δp::AbstractVector, d::AbstractVector, Δd::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
-    return posmaxstep(p, Δp), posmaxstep(d, Δd)
+function primalshadow!(sp::AbstractVector, d::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
+    return posshadow!(sp, d)
 end
 
 function posshadow!(s::AbstractVector, x::AbstractVector)
@@ -146,10 +186,34 @@ function posshadow!(s::AbstractVector, x::AbstractVector)
     return true
 end
 
-function dualshadow!(sd::AbstractVector, p::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
-    return posshadow!(sd, p)
+############################################################################################
+# primalhess!
+############################################################################################
+
+function primalhess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, ::PositiveConeCache, work::ConeWorkspace)
+    return poshess!(r, p, Δp)
 end
 
-function primalshadow!(sp::AbstractVector, d::AbstractVector, ::PositiveConeCache, ::ConeWorkspace)
-    return posshadow!(sp, d)
+function poshess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector)
+    @inbounds for i in eachindex(r)
+        r[i] = Δp[i] / p[i]^2
+    end
+
+    return r
+end
+
+############################################################################################
+# primalthird!
+############################################################################################
+
+function primalthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector, ::PositiveConeCache, work::ConeWorkspace)
+    return posthird!(r, p, Δp1, Δp2)
+end
+
+function posthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector)
+    @inbounds for i in eachindex(r)
+        r[i] = -2 * Δp1[i] * Δp2[i] / p[i]^3
+    end
+
+    return r
 end

@@ -304,7 +304,7 @@ function build_powerlaw(N::Int; K::Float64 = 1.0, p::Float64 = 1.5, V::Float64 =
         push!(cones, PowerCone(1.0 / p))
     end
 
-    return IPMProblem(Q, B, c, g, cones)
+    return IPMProblem(Q, B, c, g, 0.0, cones)
 end
 
 """

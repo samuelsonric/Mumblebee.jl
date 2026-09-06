@@ -1,17 +1,14 @@
-const IPMHistoryRow{T} = @NamedTuple{μ::T, step::T, pres::T, dres::T, pobj::T, dobj::T, ρ::T, δ::T,
+const IPMHistoryRow{T} = @NamedTuple{pres::T, dres::T, pobj::T, dobj::T, step::T,
     piter::Int, ppass::Int, pstat::KKTStatus,
     citer::Int, cpass::Int, cstat::KKTStatus,
-    dmin::T, dmax::T, χ::T}
+    dmin::T, dmax::T, ρ::T, δ::T, μ::T, χ::T}
 
 struct IPMHistory{T} <: AbstractVector{IPMHistoryRow{T}}
-    μ::Vector{T}
-    step::Vector{T}
     pres::Vector{T}
     dres::Vector{T}
     pobj::Vector{T}
     dobj::Vector{T}
-    ρ::Vector{T}
-    δ::Vector{T}
+    step::Vector{T}
     piter::Vector{Int}
     ppass::Vector{Int}
     pstat::Vector{KKTStatus}
@@ -20,69 +17,69 @@ struct IPMHistory{T} <: AbstractVector{IPMHistoryRow{T}}
     cstat::Vector{KKTStatus}
     dmin::Vector{T}
     dmax::Vector{T}
+    ρ::Vector{T}
+    δ::Vector{T}
+    μ::Vector{T}
     χ::Vector{T}
 end
 
 function IPMHistory{T}() where {T}
-    return IPMHistory{T}(T[], T[], T[], T[], T[], T[], T[], T[],
+    return IPMHistory{T}(T[], T[], T[], T[], T[],
         Int[], Int[], KKTStatus[],
         Int[], Int[], KKTStatus[],
-        T[], T[], T[])
+        T[], T[], T[], T[], T[], T[])
 end
 
 function defaultrow(::IPMHistory{T}) where {T}
     return (
-        μ = T(NaN), step = zero(T), pres = T(NaN), dres = T(NaN), pobj = T(NaN), dobj = T(NaN),
-        ρ = T(NaN), piter = 0, ppass = 0, pstat = KKT_SOLVED,
-        citer = 0, cpass = 0, cstat = KKT_SOLVED, dmin = T(NaN), dmax = T(NaN), χ = T(NaN),
+        pres = T(NaN), dres = T(NaN), pobj = T(NaN), dobj = T(NaN), step = zero(T),
+        piter = 0, ppass = 0, pstat = KKT_SOLVED,
+        citer = 0, cpass = 0, cstat = KKT_SOLVED,
+        dmin = T(NaN), dmax = T(NaN), ρ = T(NaN), δ = zero(T), μ = T(NaN), χ = T(NaN),
     )
 end
 
 function Base.getindex(hist::IPMHistory, i::Int)
-    μ       = hist.μ[i]
-    step    = hist.step[i]
     pres    = hist.pres[i]
     dres    = hist.dres[i]
     pobj    = hist.pobj[i]
     dobj    = hist.dobj[i]
-    ρ       = hist.ρ[i]
-    δ       = hist.δ[i]
+    step    = hist.step[i]
     piter   = hist.piter[i]; ppass = hist.ppass[i]; pstat = hist.pstat[i]
     citer   = hist.citer[i]; cpass = hist.cpass[i]; cstat = hist.cstat[i]
-    dmin   = hist.dmin[i]; dmax = hist.dmax[i]
+    dmin    = hist.dmin[i]; dmax = hist.dmax[i]
+    ρ       = hist.ρ[i]
+    δ       = hist.δ[i]
+    μ       = hist.μ[i]
     χ       = hist.χ[i]
-    return (; μ, step, pres, dres, pobj, dobj, ρ, δ, piter, ppass, pstat, citer, cpass, cstat,
-        dmin, dmax, χ)
+    return (; pres, dres, pobj, dobj, step, piter, ppass, pstat, citer, cpass, cstat,
+        dmin, dmax, ρ, δ, μ, χ)
 end
 
 function Base.push!(hist::IPMHistory, row::NamedTuple)
-    push!(hist.μ,       row.μ)
-    push!(hist.step,    row.step)
     push!(hist.pres,    row.pres)
     push!(hist.dres,    row.dres)
     push!(hist.pobj,    row.pobj)
     push!(hist.dobj,    row.dobj)
-    push!(hist.ρ,       row.ρ)
-    push!(hist.δ,       row.δ)
+    push!(hist.step,    row.step)
     push!(hist.piter,   row.piter); push!(hist.ppass, row.ppass); push!(hist.pstat, row.pstat)
     push!(hist.citer,   row.citer); push!(hist.cpass, row.cpass); push!(hist.cstat, row.cstat)
     push!(hist.dmin, row.dmin); push!(hist.dmax, row.dmax)
+    push!(hist.ρ, row.ρ); push!(hist.δ, row.δ); push!(hist.μ, row.μ)
     push!(hist.χ, row.χ)
     return hist
 end
 
 function Base.empty!(hist::IPMHistory)
-    empty!(hist.μ)
-    empty!(hist.step)
     empty!(hist.pres)
     empty!(hist.dres)
     empty!(hist.pobj)
     empty!(hist.dobj)
-    empty!(hist.ρ)
-    empty!(hist.δ)
+    empty!(hist.step)
     empty!(hist.piter); empty!(hist.ppass); empty!(hist.pstat)
     empty!(hist.citer); empty!(hist.cpass); empty!(hist.cstat)
     empty!(hist.dmin); empty!(hist.dmax)
+    empty!(hist.ρ); empty!(hist.δ); empty!(hist.μ)
     empty!(hist.χ)
     return hist
 end

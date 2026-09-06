@@ -327,7 +327,7 @@ function build_marginal_reconstruction(inst::MarginalInstance)
     cones = IPM.AbstractCone[CofreeCone() for _ in Wd]
     append!(cones, IPM.AbstractCone[PositiveCone() for _ in W])
 
-    return IPMProblem(Q, B, f, gs, cones)
+    return IPMProblem(Q, B, f, gs, 0.0, cones)
 end
 
 reconstructed(res, prob, inst, i) = res.p[colrange(prob.B, length(inst.Wd) + i)]

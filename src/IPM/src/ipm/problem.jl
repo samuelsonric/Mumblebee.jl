@@ -23,41 +23,49 @@ struct IPMProblem{T, I, V <: AbstractCone}
     B::BlockSparseMatrix{T, I}
     f::FVector{T}
     g::FVector{T}
+    μ::T
     K::FVector{V}
-    P1::FPermutation{I}      # row permutation
-    P2::FPermutation{I}      # column permutation
+    P1::FPermutation{I}
+    P2::FPermutation{I}
 
-    function IPMProblem{T, I, V}(Q::BlockSparseMatrix, B::BlockSparseMatrix, f::FVector, g::FVector, K::FVector, P1::FPermutation, P2::FPermutation) where {T, I, V <: AbstractCone}
-        @assert nrows(B) == length(g)
-        @assert ncols(B) == ncols(Q) == length(f)
+    function IPMProblem{T, I, V}(Q::BlockSparseMatrix, B::BlockSparseMatrix, f::FVector, g::FVector, μ::Real, K::FVector, P1::FPermutation, P2::FPermutation) where {T, I, V <: AbstractCone}
+        @assert size(P1, 1) == nrows(B) == length(g)
+        @assert size(P2, 1) == ncols(B) == ncols(Q) == length(f)
         @assert nvtxs(B) == nvtxs(Q) == length(K)
-        @assert length(P1.perm) == nrows(B)
-        @assert length(P2.perm) == ncols(B)
 
         for v in vtxs(B)
             @assert ncols(B, v) == ncols(Q, v)
         end
 
-        return new{T, I, V}(Q, B, f, g, K, P1, P2)
+        return new{T, I, V}(Q, B, f, g, μ, K, P1, P2)
     end
 end
 
 """
-    IPMProblem(Q, B, f, g, K)
+    IPMProblem(Q, B, f, g, μ, K)
 
 Construct an [`IPMProblem`](@ref).
 """
-function IPMProblem(Q::BlockSparseMatrix{T, I}, B::BlockSparseMatrix{T, I}, f::AbstractVector{T}, g::AbstractVector{T}, K::AbstractVector{V}) where {T, I, V <: AbstractCone}
+function IPMProblem(Q::BlockSparseMatrix{T, I}, B::BlockSparseMatrix{T, I}, f::AbstractVector{T}, g::AbstractVector{T}, μ::Real, K::AbstractVector{V}) where {T, I, V <: AbstractCone}
     P1 = FPermutation{I}(rows(B))
     P2 = FPermutation{I}(cols(B))
-    return IPMProblem{T, I, V}(Q, B, f, g, K, P1, P2)
+    return IPMProblem{T, I, V}(Q, B, f, g, μ, K, P1, P2)
 end
 
-function IPMProblem(Q::BlockSparseMatrix{T, I}, B::BlockSparseMatrix{T, I}, f::AbstractVector{T}, g::AbstractVector{T}, K::AbstractVector{V}, P1::FPermutation{I}, P2::FPermutation{I}) where {T, I, V <: AbstractCone}
-    return IPMProblem{T, I, V}(Q, B, f, g, K, P1, P2)
+function IPMProblem(Q::BlockSparseMatrix{T, I}, B::BlockSparseMatrix{T, I}, f::AbstractVector{T}, g::AbstractVector{T}, μ::Real, K::AbstractVector{V}, P1::FPermutation{I}, P2::FPermutation{I}) where {T, I, V <: AbstractCone}
+    return IPMProblem{T, I, V}(Q, B, f, g, μ, K, P1, P2)
 end
 
-function IPMProblem{T, I, V}(Q::BlockSparseMatrix, B::BlockSparseMatrix, f::AbstractVector, g::AbstractVector, K::AbstractVector, P1::FPermutation, P2::FPermutation) where {T, I, V <: AbstractCone}
+"""
+    IPMProblem(Q, B, f, g, μ, K, s; compress = 1.0)
+
+Construct an [`IPMProblem`](@ref).
+"""
+function IPMProblem(Q::SparseMatrixCSC{T, I}, B::SparseMatrixCSC{T, I}, f::AbstractVector{T}, g::AbstractVector{T}, μ::T, K::AbstractVector{V}, s::AbstractVector; compress::Real = 1.0) where {T, I, V <: AbstractCone}
+    return IPMProblem{T, I, V}(Q, B, f, g, μ, K, s; compress)
+end
+
+function IPMProblem{T, I, V}(Q::BlockSparseMatrix, B::BlockSparseMatrix, f::AbstractVector, g::AbstractVector, μ::Real, K::AbstractVector, P1::FPermutation, P2::FPermutation) where {T, I, V <: AbstractCone}
     if !(f isa FVector{T})
         f = FVector{T}(f)
     end
@@ -70,27 +78,19 @@ function IPMProblem{T, I, V}(Q::BlockSparseMatrix, B::BlockSparseMatrix, f::Abst
         K = FVector{V}(K)
     end
 
-    return IPMProblem{T, I, V}(Q, B, f, g, K, P1, P2)
+    return IPMProblem{T, I, V}(Q, B, f, g, μ, K, P1, P2)
 end
 
-function symbkkt(prob::IPMProblem, alg::EliminationAlgorithm)
-    return symbkkt(prob.Q, prob.B, prob.f, prob.g, prob.K, prob.P1, prob.P2, alg)
-end
-
-"""
-    IPMProblem(Q, B, f, g, K, s)
-
-Construct an [`IPMProblem`](@ref).
-"""
-function IPMProblem(
-        Q::SparseMatrixCSC{T},
-        B::SparseMatrixCSC{T},
+function IPMProblem{T, I, V}(
+        Q::SparseMatrixCSC,
+        B::SparseMatrixCSC,
         f::AbstractVector,
         g::AbstractVector,
+        μ::Real,
         K::AbstractVector,
         s::AbstractVector;
         compress::Real = 1.0,
-    ) where {T}
+    ) where {T, I, V <: AbstractCone}
     m, n = size(B); k = length(K)
 
     @assert size(Q, 1)   == n
@@ -108,8 +108,8 @@ function IPMProblem(
     Bc = colcompress(B, nvtx, xcol, colperm)
     nout, xrow, rowperm = twins(Bc, transpose(Bc), compress)
 
-    P1 = FPermutation{Int}(rowperm)
-    P2 = Permutation(colperm)
+    P1 = FPermutation{I}(rowperm)
+    P2 = FPermutation{I}(colperm)
 
     Bp = permute(B, rowperm, colperm)
     Qp = permute(Q, colperm, colperm)
@@ -123,7 +123,11 @@ function IPMProblem(
     mul!(fp, P2, f)
     mul!(gp, P1, g)
 
-    return IPMProblem(Qp, Bp, fp, gp, K, P1, P2)
+    return IPMProblem{T, I, V}(Qp, Bp, fp, gp, μ, K, P1, P2)
+end
+
+function symbkkt(prob::IPMProblem, alg::EliminationAlgorithm)
+    return symbkkt(prob.Q, prob.B, prob.f, prob.g, prob.K, prob.P1, prob.P2, alg)
 end
 
 function dropoffdz(Q::SparseMatrixCSC{T, I}) where {T, I}
@@ -240,7 +244,7 @@ function colcompress(A::SparseMatrixCSC{T, I}, nvtx::I, xcol::AbstractVector{I},
     return SparseMatrixCSC{T, I}(m, nvtx, colptr, rowval, ones(T, e))
 end
 
-function colpartition(B::SparseMatrixCSC{T, I}, Q::SparseMatrixCSC{T, I}, K::AbstractVector, s::AbstractVector, tau::Real) where {T, I}
+function colpartition(B::SparseMatrixCSC{T, I}, Q::SparseMatrixCSC{T, I}, K::AbstractVector{V}, s::AbstractVector, tau::Real) where {T, I, V}
     ncol = convert(I, size(B, 2))
 
     perm = FVector{I}(undef, ncol)
@@ -301,7 +305,7 @@ function colpartition(B::SparseMatrixCSC{T, I}, Q::SparseMatrixCSC{T, I}, K::Abs
     nvtx = nvtxP + nvtxC + nvtxR
 
     xcol = FVector{I}(undef, nvtx + one(I))
-    cone = FVector{AbstractCone}(undef, nvtx)
+    cone = FVector{V}(undef, nvtx)
 
     for j in oneto(ncolP)
         perm[j] = work[permP[j]]
@@ -344,21 +348,37 @@ function colpartition(B::SparseMatrixCSC{T, I}, Q::SparseMatrixCSC{T, I}, K::Abs
     return nvtx, xcol, perm, cone
 end
 
-function showproblem(io::IO, prob::IPMProblem; indent::Integer=0)
+function showproblem(io::IO, problem::IPMProblem; indent::Integer=0)
+    Q = problem.Q
+    B = problem.B
+    f = problem.f
+    g = problem.g
+    μ = problem.μ
+    K = problem.K
+
     pad = " "^indent
-    println(io, pad, "(P)  min   ½ pᵀ Q p - fᵀ p")
-    println(io, pad, "     s.t.  B p = g,  p ∈ K")
+
+    if μ > 0
+        println(io, pad, "(P)  min   ½ pᵀ Q p - fᵀ p + μ ψ(p)")
+        println(io, pad, "     s.t.  B p = g")
+        println(io)
+        println(io, pad, "(D)  max  -½ pᵀ Q p + gᵀ y - μ ψ*(Q p - f - Bᵀ y) - ν μ log μ")
+    else
+        println(io, pad, "(P)  min   ½ pᵀ Q p - fᵀ p")
+        println(io, pad, "     s.t.  B p = g,  p ∈ K")
+        println(io)
+        println(io, pad, "(D)  max  -½ pᵀ Q p + gᵀ y")
+        println(io, pad, "     s.t.  Q p - f - Bᵀ y ∈ K*")
+    end
+
     println(io)
-    println(io, pad, "(D)  max  -½ pᵀ Q p + gᵀ y")
-    println(io, pad, "     s.t.  Q p - f - Bᵀ y ∈ K*")
-    println(io)
-    @printf(io, "%sQ: %6d × %-6d  f: %d\n", pad, size(prob.Q, 1), size(prob.Q, 2), length(prob.f))
-    @printf(io, "%sB: %6d × %-6d  g: %d\n", pad, size(prob.B, 1), size(prob.B, 2), length(prob.g))
+    @printf(io, "%sQ: %6d × %-6d  f: %d\n", pad, size(Q, 1), size(Q, 2), length(f))
+    @printf(io, "%sB: %6d × %-6d  g: %d\n", pad, size(B, 1), size(B, 2), length(g))
     println(io)
 
     nnoc = npos = nsoc = nsdp = nexp = npow = 0
 
-    for k in prob.K
+    for k in K
         if k isa CofreeCone
             nnoc += 1
         elseif k isa PositiveCone

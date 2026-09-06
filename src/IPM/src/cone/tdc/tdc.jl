@@ -1,10 +1,5 @@
 abstract type AbstractTDCone <: AbstractCone end
 
-function workspacesize(::Type{<:AbstractTDCone}, n::Integer)
-    @assert n == 3
-    return 15
-end
-
 struct AbstractTDConeCache{C <: AbstractTDCone, T} <: AbstractCache{C}
     cone::C
     #
@@ -37,6 +32,112 @@ struct AbstractTDConeCache{C <: AbstractTDCone, T} <: AbstractCache{C}
     d4::FScalarView{T}
 end
 
+# solve for x in
+#
+#   f''(p) x = b
+#
+# using a pre-computed factorization
+#
+#   P f''(p) Pᵀ = L Lᵀ
+#
+function tdhessldiv!(L::AbstractMatrix{T}, b::AbstractVector{T}, ::AbstractTDConeCache) where {T}
+    b1, b2, b3 = b[1], b[2], b[3]
+
+    y1 =  b3                              / L[1,1]
+    y2 = (b1 - L[2,1] * y1)               / L[2,2]
+    y3 = (b2 - L[3,1] * y1 - L[3,2] * y2) / L[3,3]
+
+    z3 = y3                               / L[3,3]
+    z2 = (y2 - L[3,2] * z3)               / L[2,2]
+    z1 = (y1 - L[2,1] * z2 - L[3,1] * z3) / L[1,1]
+
+    b[1] = z2
+    b[2] = z3
+    b[3] = z1
+    return b
+end
+
+# apply the Hessian
+#
+#   f''(p) v = Pᵀ L Lᵀ P v
+#
+# using a pre-computed factorization
+#
+#   P f''(p) Pᵀ = L Lᵀ.
+#
+function tdhessmul!(out::AbstractVector{T}, L::AbstractMatrix{T}, v::AbstractVector{T}, ::AbstractTDConeCache) where {T}
+    v1, v2, v3 = v[1], v[2], v[3]
+
+    r1 = L[1,1] * v3 + L[2,1] * v1 + L[3,1] * v2
+    r2 =               L[2,2] * v1 + L[3,2] * v2
+    r3 =                             L[3,3] * v2
+
+    t1 = L[1,1] * r1
+    t2 = L[2,1] * r1 + L[2,2] * r2
+    t3 = L[3,1] * r1 + L[3,2] * r2 + L[3,3] * r3
+
+    out[1] = t2
+    out[2] = t3
+    out[3] = t1
+
+    return out
+end
+
+# materialize the scaled Hessian
+#
+#   H = μ f''(p) = μ Pᵀ L Lᵀ P
+#
+# from a pre-computed factorization
+#
+#   P f''(p) Pᵀ = L Lᵀ.
+#
+function tdgram!(H::AbstractMatrix{T}, L::AbstractMatrix{T}, μ::T, ::AbstractTDConeCache) where {T}
+    L11 = L[1,1]
+    L21 = L[2,1]; L22 = L[2,2]
+    L31 = L[3,1]; L32 = L[3,2]; L33 = L[3,3]
+
+    H[3,3] += μ * L11^2
+    H[1,1] += μ * (L21^2 + L22^2)
+    H[2,2] += μ * (L31^2 + L32^2 + L33^2)
+
+    H[1,3] = H[3,1] += μ * L21 * L11
+    H[2,3] = H[3,2] += μ * L31 * L11
+    H[1,2] = H[2,1] += μ * (L31 * L21 + L32 * L22)
+
+    return H
+end
+
+############################################################################################
+# workspacesize
+############################################################################################
+
+function workspacesize(::Type{<:AbstractTDCone}, n::Integer)
+    @assert n == 3
+    return 15
+end
+
+############################################################################################
+# degree
+############################################################################################
+
+function degree(::AbstractTDCone, n::Integer)
+    @assert n == 3
+    return 3
+end
+
+############################################################################################
+# cachesize
+############################################################################################
+
+function cachesize(::Type{<:AbstractTDCone}, n::Integer)
+    @assert n == 3
+    return 17
+end
+
+############################################################################################
+# cache
+############################################################################################
+
 function cache(c::Caches{T}, i::Integer, cone::AbstractTDCone) where {T}
     data = cachedata(c, i)
     L    = reshape(view(data, 1:9), 3, 3)
@@ -49,86 +150,14 @@ function cache(c::Caches{T}, i::Integer, cone::AbstractTDCone) where {T}
     return AbstractTDConeCache(cone, L, sd, seed, d1, d2, d3, d4)
 end
 
-# Compute the coefficient t in the rank-1 term
-# tzzᵀ of the Tuncel scaling matrix M:
-#
-#   M = ⟨p, d⟩⁻¹   d  dᵀ
-#     + ⟨δp,δd⟩⁻¹ δd δdᵀ
-#     + t          z  zᵀ,
-#
-# where
-#
-#   δp = p - μ p*
-#   δd = d - μ d*
-#
-function tdbfgs(
-        L::AbstractMatrix{T},
-        sp::AbstractVector{T},
-        sd::AbstractVector{T},
-        z::AbstractVector{T},
-        p::AbstractVector{T},
-        μv::T,
-        μt::T,
-        cache::AbstractTDConeCache,
-        w::AbstractVector{T},
-        Hw::AbstractVector{T},
-        Hz::AbstractVector{T},
-    ) where {T}
-    t = zero(T)
-    #
-    # compute the gap direction
-    #
-    #   w = p* - μ* p
-    #
-    # where is the dual centrality parameter
-    #
-    #   μ* = ⟨p*, d*⟩ / ν.
-    #
-    copystatic!(w, sp, Val(3))
-    axpystatic!(-μt, p, w, Val(3))
-    #
-    # compute the norm
-    #
-    #   ⟨w, f''(p) w⟩ = ‖Rᵀ w‖²
-    #
-    tdhessmul!(Hw, L, w, cache)
-    wHw = dotstatic(w, Hw, Val(3))
+############################################################################################
+# scale!
+############################################################################################
 
-    if wHw > 0
-        #
-        # compute the norm
-        #
-        #   ⟨z, f''(p) z⟩ = ‖Rᵀ z‖²
-        #
-        tdhessmul!(Hz, L, z, cache)
-        fppzz = dotstatic(z, Hz, Val(3))
-        #
-        # compute the dot product
-        #
-        #   ⟨d*, z⟩
-        #
-        sdz = dotstatic(sd, z, Val(3))
-        #
-        # compute the dot product
-        #
-        #   ⟨w, f''(p) z⟩ = ⟨Rᵀ w, Rᵀ z⟩
-        #
-        wHz = dotstatic(Hw, z, Val(3))
-        #
-        # compute t:
-        #
-        #   t = μ ⟨z, f''(p) z⟩
-        #     - μ ⟨d*,       z⟩² / ν
-        #     - μ ⟨w, f''(p) z⟩² / ⟨w, f''(p) w⟩
-        #
-        # using compensated arithmetic
-        #
-        s1, e1 = twosum(fppzz, -sdz^2 / 3)
-        s2, e2 = twosum(s1, -wHz^2 / wHw)
-        t = μv * (s2 + (e1 + e2))
-    end
-
-    return t
+function scale!(H::AbstractMatrix{T}, p::AbstractVector{T}, d::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, work::ConeWorkspace{T}) where {C, T}
+    flag, seed, spsd = tdscale!(H, cache.L, cache.sd, cache.seed[], p, d, cache, work)
+    cache.seed[] = seed
+    return flag, spsd
 end
 
 # Assemble the Tuncel scaling matrix
@@ -150,14 +179,14 @@ function tdscale!(
         p::AbstractVector{T},
         d::AbstractVector{T},
         cache::AbstractTDConeCache,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
 
-    sp = view(wrk.data,  1:3)
-    z  = view(wrk.data,  4:6)
-    w  = view(wrk.data,  7:9)
-    δp = view(wrk.data, 10:12)
-    δd = view(wrk.data, 13:15)
+    sp = view(work.data,  1:3)
+    z  = view(work.data,  4:6)
+    w  = view(work.data,  7:9)
+    δp = view(work.data, 10:12)
+    δd = view(work.data, 13:15)
 
     next = one(T)
     spsd = zero(T)
@@ -252,6 +281,96 @@ function tdscale!(
     return flag, next, spsd
 end
 
+# Compute the coefficient t in the rank-1 term
+# tzzᵀ of the Tuncel scaling matrix M:
+#
+#   M = ⟨p, d⟩⁻¹   d  dᵀ
+#     + ⟨δp,δd⟩⁻¹ δd δdᵀ
+#     + t          z  zᵀ,
+#
+# where
+#
+#   δp = p - μ p*
+#   δd = d - μ d*
+#
+function tdbfgs(
+        L::AbstractMatrix{T},
+        sp::AbstractVector{T},
+        sd::AbstractVector{T},
+        z::AbstractVector{T},
+        p::AbstractVector{T},
+        μv::T,
+        μt::T,
+        cache::AbstractTDConeCache,
+        w::AbstractVector{T},
+        Hw::AbstractVector{T},
+        Hz::AbstractVector{T},
+    ) where {T}
+    t = zero(T)
+    #
+    # compute the gap direction
+    #
+    #   w = p* - μ* p
+    #
+    # where is the dual centrality parameter
+    #
+    #   μ* = ⟨p*, d*⟩ / ν.
+    #
+    copystatic!(w, sp, Val(3))
+    axpystatic!(-μt, p, w, Val(3))
+    #
+    # compute the norm
+    #
+    #   ⟨w, f''(p) w⟩ = ‖Rᵀ w‖²
+    #
+    tdhessmul!(Hw, L, w, cache)
+    wHw = dotstatic(w, Hw, Val(3))
+
+    if wHw > 0
+        #
+        # compute the norm
+        #
+        #   ⟨z, f''(p) z⟩ = ‖Rᵀ z‖²
+        #
+        tdhessmul!(Hz, L, z, cache)
+        fppzz = dotstatic(z, Hz, Val(3))
+        #
+        # compute the dot product
+        #
+        #   ⟨d*, z⟩
+        #
+        sdz = dotstatic(sd, z, Val(3))
+        #
+        # compute the dot product
+        #
+        #   ⟨w, f''(p) z⟩ = ⟨Rᵀ w, Rᵀ z⟩
+        #
+        wHz = dotstatic(Hw, z, Val(3))
+        #
+        # compute t:
+        #
+        #   t = μ ⟨z, f''(p) z⟩
+        #     - μ ⟨d*,       z⟩² / ν
+        #     - μ ⟨w, f''(p) z⟩² / ⟨w, f''(p) w⟩
+        #
+        # using compensated arithmetic
+        #
+        s1, e1 = twosum(fppzz, -sdz^2 / 3)
+        s2, e2 = twosum(s1, -wHz^2 / wHw)
+        t = μv * (s2 + (e1 + e2))
+    end
+
+    return t
+end
+
+############################################################################################
+# corr!
+############################################################################################
+
+function corr!(r::AbstractVector{T}, p::AbstractVector{T}, d::AbstractVector{T}, Δp::AbstractVector{T}, Δd::AbstractVector{T}, σμ::Real, cache::AbstractTDConeCache{C, T}, work::ConeWorkspace{T}) where {C, T}
+    return tdcorr!(r, cache.L, cache.sd, p, d, Δp, Δd, σμ, cache, work)
+end
+
 # Compute the Mehrotra corrector term
 #
 #   -d - σμ f'(p) - η,
@@ -270,12 +389,12 @@ function tdcorr!(
         Δd::AbstractVector{T},
         σμ::Real,
         cache::AbstractTDConeCache,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
 
-    v =         view(wrk.data, 1:3)
-    η =         view(wrk.data, 4:6)
-    D = reshape(view(wrk.data, 7:15), 3, 3)
+    v =         view(work.data, 1:3)
+    η =         view(work.data, 4:6)
+    D = reshape(view(work.data, 7:15), 3, 3)
     #
     # solve for v in
     #
@@ -306,11 +425,27 @@ function tdcorr!(
     return r
 end
 
+############################################################################################
+# corr0!
+############################################################################################
+
+function corr0!(r::AbstractVector{T}, ::AbstractVector{T}, d::AbstractVector{T}, σμ::Real, cache::AbstractTDConeCache{C, T}, ::ConeWorkspace{T}) where {C, T}
+    return tdcorr0!(r, cache.sd, d, σμ)
+end
+
 # tdcorr! with Δp = Δd = 0.
 function tdcorr0!(r::AbstractVector{T}, sd::AbstractVector{T}, d::AbstractVector{T}, σμ::Real) where {T}
     copystatic!(r, d, Val(3))
     axpbystatic!(σμ, sd, -1, r, Val(3))
     return r
+end
+
+############################################################################################
+# maxsteps
+############################################################################################
+
+function maxsteps(p::AbstractVector{T}, Δp::AbstractVector{T}, d::AbstractVector{T}, Δd::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, work::ConeWorkspace{T}) where {C, T}
+    return tdmaxsteps(p, Δp, d, Δd, cache, work)
 end
 
 function tdmaxsteps(
@@ -319,7 +454,7 @@ function tdmaxsteps(
         d::AbstractVector{T},
         Δd::AbstractVector{T},
         cache::AbstractTDConeCache,
-        wrk::ConeWorkspace{T},
+        work::ConeWorkspace{T},
     ) where {T}
     hip = tdboundprim(p, Δp, cache)
     hid = tdbounddual(d, Δd, cache)
@@ -335,37 +470,9 @@ function tdmaxsteps(
     return τp, τd
 end
 
-#
-# AbstractCone Interface
-#
-
-function degree(::AbstractTDCone, n::Integer)
-    @assert n == 3
-    return 3
-end
-
-function cachesize(::Type{<:AbstractTDCone}, n::Integer)
-    @assert n == 3
-    return 17
-end
-
-function scale!(H::AbstractMatrix{T}, p::AbstractVector{T}, d::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, wrk::ConeWorkspace{T}) where {C, T}
-    flag, seed, spsd = tdscale!(H, cache.L, cache.sd, cache.seed[], p, d, cache, wrk)
-    cache.seed[] = seed
-    return flag, spsd
-end
-
-function corr!(r::AbstractVector{T}, p::AbstractVector{T}, d::AbstractVector{T}, Δp::AbstractVector{T}, Δd::AbstractVector{T}, σμ::Real, cache::AbstractTDConeCache{C, T}, wrk::ConeWorkspace{T}) where {C, T}
-    return tdcorr!(r, cache.L, cache.sd, p, d, Δp, Δd, σμ, cache, wrk)
-end
-
-function corr0!(r::AbstractVector{T}, ::AbstractVector{T}, d::AbstractVector{T}, σμ::Real, cache::AbstractTDConeCache{C, T}, ::ConeWorkspace{T}) where {C, T}
-    return tdcorr0!(r, cache.sd, d, σμ)
-end
-
-function maxsteps(p::AbstractVector{T}, Δp::AbstractVector{T}, d::AbstractVector{T}, Δd::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, wrk::ConeWorkspace{T}) where {C, T}
-    return tdmaxsteps(p, Δp, d, Δd, cache, wrk)
-end
+############################################################################################
+# dualshadow! / primalshadow!
+############################################################################################
 
 function dualshadow!(sd::AbstractVector{T}, p::AbstractVector{T}, cache::AbstractTDConeCache{C, T}, ::ConeWorkspace{T}) where {C, T}
     tddet!(cache, p)
@@ -379,81 +486,25 @@ function primalshadow!(sp::AbstractVector{T}, d::AbstractVector{T}, cache::Abstr
     return true
 end
 
-# solve for x in
-#
-#   f''(p) x = b
-#
-# using a pre-computed factorization
-#
-#   P f''(p) Pᵀ = L Lᵀ
-#
-function tdhessldiv!(L::AbstractMatrix{T}, b::AbstractVector{T}, ::AbstractTDConeCache) where {T}
-    b1, b2, b3 = b[1], b[2], b[3]
-
-    y1 =  b3                              / L[1,1]
-    y2 = (b1 - L[2,1] * y1)               / L[2,2]
-    y3 = (b2 - L[3,1] * y1 - L[3,2] * y2) / L[3,3]
-
-    z3 = y3                               / L[3,3]
-    z2 = (y2 - L[3,2] * z3)               / L[2,2]
-    z1 = (y1 - L[2,1] * z2 - L[3,1] * z3) / L[1,1]
-
-    b[1] = z2
-    b[2] = z3
-    b[3] = z1
-    return b
-end
-
-# apply the Hessian
-#
-#   f''(p) v = Pᵀ L Lᵀ P v
-#
-# using a pre-computed factorization
-#
-#   P f''(p) Pᵀ = L Lᵀ.
-#
-function tdhessmul!(out::AbstractVector{T}, L::AbstractMatrix{T}, v::AbstractVector{T}, ::AbstractTDConeCache) where {T}
-    v1, v2, v3 = v[1], v[2], v[3]
-
-    r1 = L[1,1] * v3 + L[2,1] * v1 + L[3,1] * v2
-    r2 =               L[2,2] * v1 + L[3,2] * v2
-    r3 =                             L[3,3] * v2
-
-    t1 = L[1,1] * r1
-    t2 = L[2,1] * r1 + L[2,2] * r2
-    t3 = L[3,1] * r1 + L[3,2] * r2 + L[3,3] * r3
-
-    out[1] = t2
-    out[2] = t3
-    out[3] = t1
-
-    return out
-end
-
-# materialize the scaled Hessian
-#
-#   H = μ f''(p) = μ Pᵀ L Lᵀ P
-#
-# from a pre-computed factorization
-#
-#   P f''(p) Pᵀ = L Lᵀ.
-#
-function tdgram!(H::AbstractMatrix{T}, L::AbstractMatrix{T}, μ::T, ::AbstractTDConeCache) where {T}
-    L11 = L[1,1]
-    L21 = L[2,1]; L22 = L[2,2]
-    L31 = L[3,1]; L32 = L[3,2]; L33 = L[3,3]
-
-    H[3,3] += μ * L11^2
-    H[1,1] += μ * (L21^2 + L22^2)
-    H[2,2] += μ * (L31^2 + L32^2 + L33^2)
-
-    H[1,3] = H[3,1] += μ * L21 * L11
-    H[2,3] = H[3,2] += μ * L31 * L11
-    H[1,2] = H[2,1] += μ * (L31 * L21 + L32 * L22)
-
-    return H
-end
-
 include("exp.jl")
 include("pow.jl")
 include("utils.jl")
+
+############################################################################################
+# primalhess!
+############################################################################################
+
+function primalhess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, cache::AbstractTDConeCache, work::ConeWorkspace)
+    return tdhessmul!(r, cache.L, Δp, cache)
+end
+
+############################################################################################
+# primalthird!
+############################################################################################
+
+function primalthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector, cache::AbstractTDConeCache{C, T}, work::ConeWorkspace) where {C, T}
+    H = reshape(view(work.data, 1:9), 3, 3)
+    tdbarrthird!(H, p, Δp1, cache)
+    mulstatic!(r, H, Δp2, one(T), zero(T), Val(3))
+    return r
+end

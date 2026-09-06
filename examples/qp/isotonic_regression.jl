@@ -149,7 +149,7 @@ function build_isotonic(n::Int, E::Vector{Tuple{Int, Int}}, a::AbstractVector;
     cones = vcat(IPM.AbstractCone[CofreeCone() for _ in 1:n],
                  IPM.AbstractCone[PositiveCone() for _ in 1:m])
 
-    return IPMProblem(Q, B, c, g, cones)
+    return IPMProblem(Q, B, c, g, 0.0, cones)
 end
 
 function build_iso_jump(n::Int, E::Vector{Tuple{Int, Int}}, a::AbstractVector;

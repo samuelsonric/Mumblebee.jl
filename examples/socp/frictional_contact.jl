@@ -238,7 +238,7 @@ function build_contact(M, H, w, f, mu)
     cones = vcat(IPM.AbstractCone[CofreeCone() for _ in 1:nb],
                  IPM.AbstractCone[SecondOrderCone() for _ in 1:nc])
 
-    return IPMProblem(Q, B, c, g, cones)
+    return IPMProblem(Q, B, c, g, 0.0, cones)
 end
 
 function build_contact_jump(M, H, w, f, mu; optimizer)

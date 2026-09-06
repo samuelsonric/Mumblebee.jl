@@ -228,7 +228,7 @@ function build_plap(nv::Int, E::Vector{Tuple{Int, Int}}, w::Vector{Float64},
     cones = vcat(IPM.AbstractCone[CofreeCone() for _ in 1:nu],
                  IPM.AbstractCone[PowerCone(1.0 / p) for _ in 1:e])
 
-    return IPMProblem(Q, B, c, gs, cones), umap
+    return IPMProblem(Q, B, c, gs, 0.0, cones), umap
 end
 
 function build_plap_jump(nv::Int, E::Vector{Tuple{Int, Int}}, w::Vector{Float64},

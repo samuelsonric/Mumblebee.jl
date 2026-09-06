@@ -345,7 +345,7 @@ function build_bingham(N::Int; Bi::Float64 = 2.0, mu::Float64 = 1.0, V::Float64 
     cones = vcat(IPM.AbstractCone[CofreeCone() for _ in 1:nv],
                  IPM.AbstractCone[SecondOrderCone() for _ in 1:nsoc])
 
-    return IPMProblem(Q, B, c, g, cones)
+    return IPMProblem(Q, B, c, g, 0.0, cones)
 end
 
 # JuMP twin of `build_bingham`.

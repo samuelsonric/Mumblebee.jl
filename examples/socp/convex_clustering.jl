@@ -141,7 +141,7 @@ function build_convex_clustering(A::AbstractMatrix, G::AbstractGraph;
     cones = vcat(IPM.AbstractCone[CofreeCone() for _ in 1:n],
                  IPM.AbstractCone[SecondOrderCone() for _ in 1:ne(G)])
 
-    return IPMProblem(Q, B, c, g, cones)
+    return IPMProblem(Q, B, c, g, 0.0, cones)
 end
 
 function build_cc_jump(A::AbstractMatrix, G::AbstractGraph;

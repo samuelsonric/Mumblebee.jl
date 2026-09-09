@@ -22,7 +22,7 @@ function isoptimal(μ::T, μs::T, μt::T, pobj::T, dobj::T, pres::T, dres::T, ν
 
     tol = gap_tol * max(one(T), min(abs(pobj), abs(dobj)))
 
-    if μt > 0
+    if μt > 0 && ν > 0
         return ν * (μ - μt + μt * log1p(μs * μt - one(T))) ≤ tol
     else
         return pobj - dobj < tol

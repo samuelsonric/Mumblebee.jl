@@ -30,6 +30,16 @@ struct AbstractTDConeCache{C <: AbstractTDCone, T} <: AbstractCache{C}
     d2::FScalarView{T}
     d3::FScalarView{T}
     d4::FScalarView{T}
+    #
+    # the line-search membership values at the current iterate:
+    # h0p = h_prim(0) written by tddet!, h0d = h_dual(0) written by
+    # tddualgrad!. These are pure functions of the point (no direction),
+    # so the writers — which see every edge case — own their correctness;
+    # rays and overflow regimes are written as the semantically correct
+    # ±Inf. Readers only add the direction-dependent h'(0)
+    #
+    h0p::FScalarView{T}
+    h0d::FScalarView{T}
 end
 
 # solve for x in
@@ -131,7 +141,7 @@ end
 
 function cachesize(::Type{<:AbstractTDCone}, n::Integer)
     @assert n == 3
-    return 17
+    return 19
 end
 
 ############################################################################################
@@ -147,7 +157,9 @@ function cache(c::Caches{T}, i::Integer, cone::AbstractTDCone) where {T}
     d2   = view(data, 15)
     d3   = view(data, 16)
     d4   = view(data, 17)
-    return AbstractTDConeCache(cone, L, sd, seed, d1, d2, d3, d4)
+    h0p  = view(data, 18)
+    h0d  = view(data, 19)
+    return AbstractTDConeCache(cone, L, sd, seed, d1, d2, d3, d4, h0p, h0d)
 end
 
 ############################################################################################
@@ -459,12 +471,12 @@ function tdmaxsteps(
     hip = tdboundprim(p, Δp, cache)
     hid = tdbounddual(d, Δd, cache)
 
-    τp = nflast(hip) do τ
-        tdjetprim(τ, p, Δp, cache)
+    τp = nflog3(hip, cache.h0p[], tdhp0prim(p, Δp, cache)) do τ
+        tdjetprimlog(τ, p, Δp, cache)
     end
 
-    τd = nflast(hid) do τ
-        tdjetdual(τ, d, Δd, cache)
+    τd = nflog3(hid, cache.h0d[], tdhp0dual(d, Δd, cache)) do τ
+        tdjetduallog(τ, d, Δd, cache)
     end
 
     return τp, τd

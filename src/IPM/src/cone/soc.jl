@@ -514,12 +514,15 @@ end
 function sochess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, pdet::Real)
     n = length(p)
     pΔp, _ = socdot(p, Δp)
-    pdet2 = pdet^2
 
-    @inbounds r[1] = muladd(4pΔp, p[1], -2pdet * Δp[1]) / pdet2
+    t = pΔp / pdet
+    γ = 2 / pdet
+    t2 = 2t
+
+    @inbounds r[1] = γ * muladd(t2, p[1], -Δp[1])
 
     @inbounds for i in 2:n
-        r[i] = muladd(-4pΔp, p[i], 2pdet * Δp[i]) / pdet2
+        r[i] = γ * muladd(-t2, p[i], Δp[i])
     end
 
     return r
@@ -539,12 +542,17 @@ function socthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, �
     pΔp2,   _ = socdot(p, Δp2)
     Δp1Δp2, _ = socdot(Δp1, Δp2)
 
-    pdet2 = pdet^2; f = 4 / pdet2; e = 16pΔp1 * pΔp2 / (pdet2 * pdet)
+    u1 = pΔp1 / pdet
+    u2 = pΔp2 / pdet
+    v  = Δp1Δp2 / pdet
 
-    @inbounds r[1] = muladd(f, muladd(pΔp1, Δp2[1], muladd(pΔp2, Δp1[1], Δp1Δp2 * p[1])), -e * p[1])
+    γ = 4 / pdet
+    c = muladd(-4u1, u2, v)
+
+    @inbounds r[1] = γ * muladd(u1, Δp2[1], muladd(u2, Δp1[1], c * p[1]))
 
     @inbounds for i in 2:n
-        r[i] = muladd(-f, muladd(pΔp1, Δp2[i], muladd(pΔp2, Δp1[i], Δp1Δp2 * p[i])), e * p[i])
+        r[i] = -γ * muladd(u1, Δp2[i], muladd(u2, Δp1[i], c * p[i]))
     end
 
     return r

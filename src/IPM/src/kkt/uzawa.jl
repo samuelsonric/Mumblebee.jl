@@ -14,26 +14,9 @@ struct UzawaSolver{UPLO, T, I <: Integer} <: KKTSolver{T}
     δy::FVector{T}
 end
 
-struct PivotedUzawaSolver{UPLO, T, I <: Integer} <: KKTSolver{T}
-    F::FChordalTriangular{:N, UPLO, T, I}
-    L::BlockSparseMatrix{T, I}
-    facwrk::FactorizationWorkspace{T, I}
-    divwrk::DivisionWorkspace{T}
-    itrwrk::CGWorkspace{T}
-    hist::FVector{T}
-    δ::FScalar{T}
-    δf::FVector{T}
-    δg::FVector{T}
-    δx::FVector{T}
-    δy::FVector{T}
-    S::ChordalSymbolic{I}
-    P::FPermutation{I}
-    w::FVector{T}
-end
-
 function UzawaSolver(S::ChordalSymbolic{I}, B::BlockSparseMatrix{T, I}; cgmax::Integer = 2size(B, 2), irmax::Integer = 10) where {T, I <: Integer}
-    F = FChordalTriangular{:N, :L, T, I}(S)
     m, n = size(B)
+    F = FChordalTriangular{:N, :L, T, I}(S)
     facwrk = FactorizationWorkspace(F)
     divwrk = DivisionWorkspace{T}(F.S, 1)
     itrwrk = CGWorkspace{T}(m, n; itmax = cgmax)
@@ -46,10 +29,32 @@ function UzawaSolver(S::ChordalSymbolic{I}, B::BlockSparseMatrix{T, I}; cgmax::I
     return UzawaSolver(F, B' * B, facwrk, divwrk, itrwrk, hist, δ, δf, δg, δx, δy)
 end
 
-function PivotedUzawaSolver(S::ChordalSymbolic{I}, B::BlockSparseMatrix{T, I}; cgmax::Integer = 2size(B, 2), irmax::Integer = 10) where {T, I <: Integer}
-    F = FChordalTriangular{:N, :L, T, I}(S)
+struct StableUzawaSolver{UPLO, T, I <: Integer} <: KKTSolver{T}
+    F::FChordalTriangular{:N, UPLO, T, I}
+    H::HyperSymbolic{I}
+    facwrk::LowrankWorkspace{T, I}
+    Bt::SparseMatrixCSC{T, I}
+    D::BlockSparseMatrix{T, I}
+    divwrk::DivisionWorkspace{T}
+    itrwrk::CGWorkspace{T}
+    hist::FVector{T}
+    δ::FScalar{T}
+    δf::FVector{T}
+    δg::FVector{T}
+    δx::FVector{T}
+    δy::FVector{T}
+end
+
+function StableUzawaSolver(S::ChordalSymbolic{I}, B::BlockSparseMatrix{T, I}; cgmax::Integer = 2size(B, 2), irmax::Integer = 10) where {T, I <: Integer}
     m, n = size(B)
-    facwrk = FactorizationWorkspace(F)
+
+    Bt = sparse(transpose(B))
+    Bt = colpermute(Bt, lowrank_sparse_permutation(Bt))
+
+    F = FChordalTriangular{:N, :L, T, I}(S)
+    H = HyperSymbolic(F.S, Bt)
+    facwrk = LowrankWorkspace{T}(F.S, H)
+    D = allocblockdiag(B)
     divwrk = DivisionWorkspace{T}(F.S, 1)
     itrwrk = CGWorkspace{T}(m, n; itmax = cgmax)
     hist = FVector{T}(undef, irmax + 2)
@@ -58,9 +63,7 @@ function PivotedUzawaSolver(S::ChordalSymbolic{I}, B::BlockSparseMatrix{T, I}; c
     δg = FVector{T}(undef, m)
     δx = FVector{T}(undef, n)
     δy = FVector{T}(undef, m)
-    P = FPermutation{I}(n)
-    w = FVector{T}(undef, n)
-    return PivotedUzawaSolver(F, B' * B, facwrk, divwrk, itrwrk, hist, δ, δf, δg, δx, δy, copy(F.S), P, w)
+    return StableUzawaSolver(F, H, facwrk, Bt, D, divwrk, itrwrk, hist, δ, δf, δg, δx, δy)
 end
 
 # ============================================================================
@@ -111,35 +114,52 @@ function initkkt!(
     return iszero(info), ρ
 end
 
-function initkkt!(wrk::PivotedUzawaSolver{UPLO, T}, A::BlockSparseMatrix; δ::T) where {UPLO, T}
+function initkkt!(wrk::StableUzawaSolver{UPLO, T}, A::BlockSparseMatrix; δ::T) where {UPLO, T}
     wrk.δ[] = δ
-    return initkkt!(wrk.facwrk, wrk.F, wrk.S, wrk.P, wrk.L, A, δ)
+    return initkkt!(wrk.facwrk, wrk.F, wrk.H, wrk.Bt, wrk.D, A, δ)
 end
 
 function initkkt!(
-        facwrk::FactorizationWorkspace{T},
+        facwrk::LowrankWorkspace{T},
         F::ChordalTriangular{:N, UPLO, T},
-        S::ChordalSymbolic,
-        P::Permutation,
-        L::BlockSparseMatrix,
+        H::HyperSymbolic,
+        Bt::SparseMatrixCSC,
+        D::BlockSparseMatrix,
         A::BlockSparseMatrix,
         δ::Real,
     ) where {UPLO, T}
-    @assert size(F, 1) == size(L, 1) == size(A, 1)
+    #
+    # copy A into D
+    #
+    #   D ← A
+    #
+    copyto!(D.val, A.val)
+    #
+    # factorize D
+    #
+    #   D = L Lᵀ
+    #
+    # and store D ← L
+    #
+    flag = cholblockdiag!(D)
 
-    copyto!(F.S, S)
-    copyto!(P.perm, axes(F, 1))
-    copyto!(P.invp, axes(F, 1))
-    #
-    # factorize the augmented matrix
-    #
-    #   F Fᵀ = P (δ A + Bᵀ B) Pᵀ
-    #
-    copyto!(F, L)
-    axpy!(δ, A, F)
-    cholesky!(facwrk, F, P, RowMaximum(); check = false)
+    if flag
+        #
+        # copy D into F
+        #
+        #   F ← √δ D
+        #
+        axpby!(sqrt(δ), D, false, F)
+        #
+        # update F
+        #
+        #   δ A + Bᵀ B = F Fᵀ
+        #
+        info = lowrankupdate!(facwrk, F, H, nonzeros(Bt))
+        flag &= iszero(info)
+    end
 
-    return true, zero(T)
+    return flag, zero(T)
 end
 
 # ============================================================================
@@ -272,7 +292,7 @@ end
 function solvekkt!(
         fstop::Function,
         gstop::Function,
-        wrk::PivotedUzawaSolver,
+        wrk::StableUzawaSolver,
         x::AbstractVector,
         y::AbstractVector,
         A::AbstractMatrix,
@@ -283,19 +303,13 @@ function solvekkt!(
     )
     F = wrk.F
     d = wrk.divwrk
-    P = wrk.P
-    w = wrk.w
 
     function L!(v)
-        mul!(w, P, v)
-        lpdiv!(d, F, w)
-        return copyto!(v, w)
+        return ldiv!(d, F, v)
     end
 
     function U!(v)
-        lpdiv!(d, F', v)
-        mul!(w, P', v)
-        return copyto!(v, w)
+        return ldiv!(d, F', v)
     end
 
     return solvekkt!(fstop, gstop, L!, U!, wrk.itrwrk, wrk.hist, wrk.δf, wrk.δg,

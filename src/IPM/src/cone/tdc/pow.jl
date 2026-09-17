@@ -279,7 +279,10 @@ function powdualgrad!(sp::AbstractVector{T}, seed::T, d::AbstractVector{T}, α::
         @inbounds sp[2] = (b +     α) / d2
         @inbounds sp[3] = zero(T)
 
-        return one(T)
+        #
+        # d₃ = 0 ray: t₁ > 0 at an interior dual, so h(0) = +Inf
+        #
+        return one(T), T(Inf)
     end
 
     k1 = (1 - α) / a
@@ -309,8 +312,18 @@ function powdualgrad!(sp::AbstractVector{T}, seed::T, d::AbstractVector{T}, α::
              floatmin(T) <= W0  < T(Inf)
 
     if !normal
-        W0 = exp(2log(abs(d3)) - log(T(4)) +
-                 a * (log(a) - log(d1)) + b * (log(b) - log(d2)))
+        lW0 = 2log(abs(d3)) - log(T(4)) +
+              a * (log(a) - log(d1)) + b * (log(b) - log(d2))
+        W0 = exp(lW0)
+    else
+        #
+        # log W₀ is now the solver's own working constant (the residual
+        # below is log-form) and doubles as the dual jet(0) seed:
+        # h(0) = −log(W₀)/2 exactly. On this path its absolute error is
+        # ~eps; the fallback's ~350ε also certifies against the seed's
+        # constant band
+        #
+        lW0 = log(W0)
     end
     #
     # bracket for free, flooring the margin f(0) = 1 - W₀ for
@@ -340,39 +353,53 @@ function powdualgrad!(sp::AbstractVector{T}, seed::T, d::AbstractVector{T}, α::
     u = inv(max(seed, one(T)))
 
     if !(lo < u < hi)
-        fp0  = -(1 + W0)
-        fpp0 = -W0 * (1 - (k1^2 * a + k2^2 * b))
+        Fpp0 = one(T) - (k1^2 * a + k2^2 * b)
 
-        u = -2f0 * fp0 / (2 * fp0^2 - f0 * fpp0)
+        u = -4lW0 / (8 - lW0 * Fpp0)
 
         if !(lo < u < hi)
             u = T(0.7) * f0
         end
     end
     #
-    # solve 1 - u = W₀ (1 + k₁u)ᵃ (1 + k₂u)ᵇ by one-division
-    # Halley; f'' reuses W and the slope sum σ, no extra pow
+    # solve the LOG residual
+    #
+    #   F(u) = log W₀ + a log1p(k₁u) + b log1p(k₂u) − log1p(−u) = 0
+    #
+    # (same root, measured equal-or-better accuracy at every margin,
+    # since F's absolute error is ~eps from lW0 versus the linear
+    # residual's ~4ε per-iteration W). The step is regime-selected:
+    # where the 1/(1−u) pole dominates the slope, Halley-in-u creeps,
+    # and the pole-matched step 1 − (1−u)·exp(F) — exact for
+    # F ≈ A − log(1−u) — is primary; in the margin regime (F' ≈ 2)
+    # Halley is primary. Each safeguards the other, then bisection
     #
     for _ in 1:60
         r1 = 1 + k1 * u
         r2 = 1 + k2 * u
-        W  = W0 * (r2 * r2) * (r1 / r2)^a
-        fv = 1 - u - W
+        Fv = lW0 + a * log1p(k1 * u) + b * log1p(k2 * u) - log1p(-u)
 
         σ  = k1 * a / r1 + k2 * b / r2
-        fp = -1 - W * σ
+        Fp = σ + 1 / (1 - u)
 
-        if fv > 0
+        if Fv < 0
             lo = u
-        elseif fv < 0
+        elseif Fv > 0
             hi = u
         else
             break
         end
 
         σp  = -(k1^2 * a / r1^2 + k2^2 * b / r2^2)
-        fpp = -W * (σ^2 + σp)
-        un  = u - 2fv * fp / (2 * fp^2 - fv * fpp)
+        Fpp = σp + 1 / (1 - u)^2
+
+        if 1 / (1 - u) > 4σ
+            un  = 1 - (1 - u) * exp(Fv)
+            alt = u - 2Fv * Fp / (2 * Fp^2 - Fv * Fpp)
+        else
+            un  = u - 2Fv * Fp / (2 * Fp^2 - Fv * Fpp)
+            alt = 1 - (1 - u) * exp(Fv)
+        end
 
         if !(lo < un < hi)
             #
@@ -384,13 +411,12 @@ function powdualgrad!(sp::AbstractVector{T}, seed::T, d::AbstractVector{T}, α::
                 break
             end
 
-            un = (lo + hi) / 2
+            un = (lo < alt < hi) ? alt : (lo + hi) / 2
         end
         #
-        # f carries the absolute eps of its leading 1, so u is
-        # resolvable only to ~eps absolute — which is the
-        # eps/margin conditioning of ρ = 1/u, intrinsic to the
-        # problem in any parametrization
+        # F carries ~eps absolute (from lW0), so u is resolvable
+        # to ~eps absolute — the eps/margin conditioning of
+        # ρ = 1/u, intrinsic to the problem in any parametrization
         #
         converged = abs(un - u) < 4 * eps(T) * (1 + abs(un))
 
@@ -413,7 +439,12 @@ function powdualgrad!(sp::AbstractVector{T}, seed::T, d::AbstractVector{T}, α::
     @inbounds sp[2] = (b * ρ +     α) / d2
     @inbounds sp[3] = -2(ρ - one(T)) / d3
 
-    return ρ
+    #
+    # emit the dual line-search membership value h(0) = −log(W₀)/2;
+    # valid on both W₀ paths (the fallback's ~350ε certifies against
+    # the constant band)
+    #
+    return ρ, -lW0 / 2
 end
 
 #
@@ -426,6 +457,12 @@ function tddet!(cache::PowerConeCache, p::AbstractVector)
     cache.d1[] = pv
     cache.d2[] = ρ
     cache.d3[] = invdet
+    #
+    # the primal line-search membership value h(0) = log(P)/2 − log|x₃|;
+    # x₃ = 0, and P over/underflow, all land as the semantically correct
+    # ±Inf (NaN in the doubly-degenerate corner reads as not-certified)
+    #
+    @inbounds cache.h0p[] = log(pv) / 2 - log(abs(p3))
     return cache
 end
 
@@ -442,7 +479,9 @@ function tdbarrthird!(D::AbstractMatrix, p::AbstractVector, u::AbstractVector, c
 end
 
 function tddualgrad!(sp::AbstractVector, seed, d::AbstractVector, cache::PowerConeCache{T}) where {T}
-    return powdualgrad!(sp, seed, d, cache.cone.α)
+    next, h0 = powdualgrad!(sp, seed, d, cache.cone.α)
+    cache.h0d[] = h0
+    return next
 end
 
 function tdboundprim(p::AbstractVector{T}, Δp::AbstractVector{T}, ::PowerConeCache{T}) where {T}
@@ -453,198 +492,99 @@ function tdbounddual(d::AbstractVector{T}, Δd::AbstractVector{T}, ::PowerConeCa
     return powbounddual(d, Δd)
 end
 
-# The primal power-cone jet (g, gp, gpp, noise, c), where
 #
-#   g = x₁^α x₂^(1-α) - |x₃|
+# powjetprimlog(τ, p, Δp, α) -> (h, h′, h″)
 #
-# on the closed domain x₁, x₂ ≥ 0 (boundary gives finite g = -|x₃|),
-# evaluated in the exact-α form
+# the log-form primal membership function
+# h = α log x₁ + β log x₂ − log|x₃| along the ray x = p + τ Δp; every
+# log term is bounded by ~745, bounding the absolute error of h by the
+# universal band, and β enters linearly (no exponent bias). Closure
+# rays are ±Inf
 #
-#   t₁ = x₂ (x₁/x₂)^α:
-#
-# only α — an exact input — ever appears as an exponent (one ^, not
-# two). The naive two-pow form exponentiates β̃ = fl(1-α), a
-# systematic relative bias
-#
-#   |β̃ - β| |log x₂| ≤ (ε/4) |log x₂|
-#
-# — up to ~175ε at extreme scales, outside any fixed noise constant;
-# here β enters only linearly, where fl(1-α) is exact by Sterbenz for
-# α ≥ 1/2 and a u-level perturbation otherwise. Noise 16 ε (t₁ + t₂);
-# adversarial one-sided error ≤ 1.1 ε·base under the normality guard:
-# refusal (noise = NaN) when a coordinate, the ratio x₁/x₂, or t₁ is
-# subnormal, or the ratio is non-finite — a rounding into the
-# subnormal range carries O(1) relative error which (·)^α damps only
-# to ~α·O(1) ≈ 10¹²·ε, silently unsound under any ε-scale band. The
-# kink at x₃ = 0 needs only a supergradient (sgn = 0 there).
-#
-#   g″ = -αβ t₁ (Δ₁/x₁ - Δ₂/x₂)².
-#
-# No overflow (powers of positives are finite). No candidates (K = 0):
-# the frozen-coordinate root extractions xᵢ (t₂/t₁)^(1/exponent)
-# measured 0.4-0.5 evals of value against two ^ per accept — a
-# wall-time loss — and pow has no starved region for candidates to
-# serve. Requires a faithfully-rounded ^. Not scale-equivariant in
-# floats (2^(kα) is non-dyadic): results drift ulps under power-of-2
-# input scaling, within the noise band.
-#
-function powjetprim(τ::T, p::AbstractVector{T}, Δp::AbstractVector{T}, α::T) where {T}
+
+function powjetprimlog(τ::T, p::AbstractVector{T}, Δp::AbstractVector{T}, α::T) where {T}
     @inbounds p1, p2, p3 = p[1], p[2], p[3]
     @inbounds Δ1, Δ2, Δ3 = Δp[1], Δp[2], Δp[3]
 
     β = one(T) - α
 
-    x1 = fma(τ, Δ1, p1)
-    x2 = fma(τ, Δ2, p2)
-    x3 = fma(τ, Δ3, p3)
-
-    g, gp, gpp, n = T(-Inf), T(NaN), T(NaN), zero(T)
+    x1 = muladd(τ, Δ1, p1)
+    x2 = muladd(τ, Δ2, p2)
+    x3 = muladd(τ, Δ3, p3)
 
     if x1 > 0 && x2 > 0
-        #
-        # exact-α: one ^
-        #
-        q  = x1 / x2
-        t1 = x2 * q^α
-        t2 = abs(x3)
-
-        g = t1 - t2
-
         if iszero(x3)
-            sgn = zero(T)
-        else
-            sgn = copysign(one(T), x3)
+            return T(Inf), T(NaN), T(NaN)
         end
 
-        gp = t1 * (α * Δ1 / x1 + β * Δ2 / x2) - sgn * Δ3
+        h = α * log(x1) + β * log(x2) - log(abs(x3))
 
-        qd  = Δ1 / x1 - Δ2 / x2
-        gpp = -α * β * t1 * qd * qd
-        #
-        # refusal: nothing certifies outside the rounding
-        # model's preconditions
-        #
-        if issubnormal(x1) | issubnormal(x2) | issubnormal(x3) |
-           issubnormal(q) | issubnormal(t1) | !isfinite(q)
-            n = T(NaN)
-        else
-            n = 16 * eps(T) * (t1 + t2)
-        end
+        hp = α * Δ1 / x1 + β * Δ2 / x2 - Δ3 / x3
+        hpp = -α * (Δ1 / x1)^2 - β * (Δ2 / x2)^2 + (Δ3 / x3)^2
+
+        return h, hp, hpp
     elseif (iszero(x1) && x2 >= 0) || (x1 >= 0 && iszero(x2))
-        g = -abs(x3)
-
-        if iszero(x3)
-            sgn = zero(T)
-        else
-            sgn = copysign(one(T), x3)
-        end
-
-        gp  = -sgn * Δ3
-        gpp = zero(T)
-
-        if issubnormal(x1) | issubnormal(x2) | issubnormal(x3)
-            n = T(NaN)
-        end
+        return (iszero(x3) ? zero(T) : T(-Inf)), T(NaN), T(NaN)
     end
 
-    return g, gp, gpp, n, T(NaN)
+    return T(-Inf), T(NaN), T(NaN)
 end
 
-# The dual power-cone jet (g, gp, gpp, noise, c), where
 #
-#   g = (s₁/α)^α (s₂/(1-α))^(1-α) - |s₃|
+# powjetduallog(τ, d, Δd, α) -> (h, h′, h″)
 #
-# on closed s₁, s₂ ≥ 0, evaluated in the exact-α form
+# the log-form dual membership function along s = d + τ Δd, with
+# u₁ = s₁/α and u₂ = s₂/β
 #
-#   t₁ = u₂ (u₁/u₂)^α,   u₁ = s₁/α,   u₂ = s₂/β:
-#
-# only α exponentiates (one ^); β enters only linearly (see
-# powjetprim for the β̃-exponent bias this removes — it also
-# supersedes the former max-scaling, whose job of keeping pow-argument
-# logs bounded is now done explicitly by the normality guard:
-# |log(u₁/u₂)| ≤ ~708 whenever the eval certifies). Isomorphic to the
-# primal under diag(1/α, 1/(1-α), 1); same noise 16 ε (t₁ + t₂), same
-# guard (coordinates, the ratio u₁/u₂, t₁), same g″, same
-# candidate-free K = 0 path. Adversarial one-sided error ≤ 1.6 ε·base
-# under the guard.
-#
-# The guard is not decorative: without it, straddled scales drive the
-# ratio subnormal and the 64ε-era certificate is falsifiable — e.g.
-# α = 0.005, s = (9.87e251, 1.13e-60, 4.23e-59),
-# Δs = (0, -2.60e-61, 4.18e-63): fl certifies g = 1.26e-72 ≥ noise at
-# τ = 0 while exact g = -2.91e-74 < 0; measured 31/250 false
-# certificates on that family, 0 with the guard (147 explicit
-# refusals). Requires a faithfully-rounded ^.
-#
-function powjetdual(τ::T, d::AbstractVector{T}, Δd::AbstractVector{T}, α::T) where {T}
+
+function powjetduallog(τ::T, d::AbstractVector{T}, Δd::AbstractVector{T}, α::T) where {T}
     @inbounds d1, d2, d3 = d[1], d[2], d[3]
     @inbounds Δ1, Δ2, Δ3 = Δd[1], Δd[2], Δd[3]
 
     β = one(T) - α
 
-    s1 = fma(τ, Δ1, d1)
-    s2 = fma(τ, Δ2, d2)
-    s3 = fma(τ, Δ3, d3)
-
-    g, gp, gpp, n = T(-Inf), T(NaN), T(NaN), zero(T)
+    s1 = muladd(τ, Δ1, d1)
+    s2 = muladd(τ, Δ2, d2)
+    s3 = muladd(τ, Δ3, d3)
 
     if s1 > 0 && s2 > 0
-        #
-        # exact-α: one ^
-        #
-        u1 = s1 / α
-        u2 = s2 / β
-
-        q  = u1 / u2
-        t1 = u2 * q^α
-        t2 = abs(s3)
-
-        g = t1 - t2
-
         if iszero(s3)
-            sgn = zero(T)
-        else
-            sgn = copysign(one(T), s3)
+            return T(Inf), T(NaN), T(NaN)
         end
 
-        gp = t1 * (α * Δ1 / s1 + β * Δ2 / s2) - sgn * Δ3
+        h = α * log(s1 / α) + β * log(s2 / β) - log(abs(s3))
 
-        qd  = Δ1 / s1 - Δ2 / s2
-        gpp = -α * β * t1 * qd * qd
-        #
-        # refusal: nothing certifies outside the rounding
-        # model's preconditions
-        #
-        if issubnormal(s1) | issubnormal(s2) | issubnormal(s3) |
-           issubnormal(q) | issubnormal(t1) | !isfinite(q)
-            n = T(NaN)
-        else
-            n = 16 * eps(T) * (t1 + t2)
-        end
+        hp = α * Δ1 / s1 + β * Δ2 / s2 - Δ3 / s3
+        hpp = -α * (Δ1 / s1)^2 - β * (Δ2 / s2)^2 + (Δ3 / s3)^2
+
+        return h, hp, hpp
     elseif (iszero(s1) && s2 >= 0) || (s1 >= 0 && iszero(s2))
-        g = -abs(s3)
-
-        if iszero(s3)
-            sgn = zero(T)
-        else
-            sgn = copysign(one(T), s3)
-        end
-
-        gp  = -sgn * Δ3
-        gpp = zero(T)
-
-        if issubnormal(s1) | issubnormal(s2) | issubnormal(s3)
-            n = T(NaN)
-        end
+        return (iszero(s3) ? zero(T) : T(-Inf)), T(NaN), T(NaN)
     end
 
-    return g, gp, gpp, n, T(NaN)
+    return T(-Inf), T(NaN), T(NaN)
 end
 
-function tdjetprim(τ::T, p::AbstractVector{T}, Δp::AbstractVector{T}, cache::PowerConeCache{T}) where {T}
-    return powjetprim(τ, p, Δp, cache.cone.α)
+function tdjetprimlog(τ::T, p::AbstractVector{T}, Δp::AbstractVector{T}, cache::PowerConeCache{T}) where {T}
+    return powjetprimlog(τ, p, Δp, cache.cone.α)
 end
 
-function tdjetdual(τ::T, d::AbstractVector{T}, Δd::AbstractVector{T}, cache::PowerConeCache{T}) where {T}
-    return powjetdual(τ, d, Δd, cache.cone.α)
+function tdjetduallog(τ::T, d::AbstractVector{T}, Δd::AbstractVector{T}, cache::PowerConeCache{T}) where {T}
+    return powjetduallog(τ, d, Δd, cache.cone.α)
+end
+
+function tdhp0prim(p::AbstractVector{T}, Δp::AbstractVector{T}, cache::PowerConeCache{T}) where {T}
+    @inbounds x1, x2, x3 = p[1], p[2], p[3]
+    @inbounds Δ1, Δ2, Δ3 = Δp[1], Δp[2], Δp[3]
+
+    α = cache.cone.α
+
+    return α * Δ1 / x1 + (one(T) - α) * Δ2 / x2 - Δ3 / x3
+end
+
+function tdhp0dual(d::AbstractVector{T}, Δd::AbstractVector{T}, cache::PowerConeCache{T}) where {T}
+    @inbounds s1, s2, s3 = d[1], d[2], d[3]
+    @inbounds Δ1, Δ2, Δ3 = Δd[1], Δd[2], Δd[3]
+    α = cache.cone.α
+    return α * Δ1 / s1 + (one(T) - α) * Δ2 / s2 - Δ3 / s3
 end

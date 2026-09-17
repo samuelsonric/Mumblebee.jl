@@ -441,8 +441,8 @@ function IPMSolver(prob::IPMProblem{T, I}, settings::IPMSettings{T}; p0=nothing,
         equilibrate!(scaling, B, Q, f, g; itmax=settings.scale_max_iter)
     end
 
-    if settings.pivot
-        kkt = PivotedUzawaSolver(S, B; cgmax=settings.newton_max_iter, irmax=settings.refine_max_iter)
+    if settings.stable
+        kkt = StableUzawaSolver(S, B; cgmax=settings.newton_max_iter, irmax=settings.refine_max_iter)
     else
         kkt = UzawaSolver(S, B; cgmax=settings.newton_max_iter, irmax=settings.refine_max_iter)
     end

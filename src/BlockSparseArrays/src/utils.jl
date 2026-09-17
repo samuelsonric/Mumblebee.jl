@@ -87,6 +87,57 @@ function binarysearchlast(A::AbstractVector{I}, v::I, strt::I, stop::I) where {I
     return lo
 end
 
+for (fname, elty) in ((:dgeqp3_, :Float64), (:sgeqp3_, :Float32))
+    @eval function geqp3!(A::AbstractMatrix{$elty}, piv::AbstractVector{BlasInt}, tau::AbstractVector{$elty}, work::Vector{$elty})
+        m, n = size(A)
+        lda = stride(A, 2)
+        info = Ref{BlasInt}()
+        lwork = BlasInt(-1)
+
+        length(work) < 1 && resize!(work, 1)
+
+        for i in 1:2
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
+                  (Ref{BlasInt}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
+                   Ptr{BlasInt}, Ptr{$elty}, Ptr{$elty}, Ref{BlasInt}, Ptr{BlasInt}),
+                  m, n, A, lda, piv, tau, work, lwork, info)
+
+            chklapackerror(info[])
+
+            if i == 1
+                lwork = BlasInt(real(work[1]))
+                length(work) < lwork && resize!(work, lwork)
+            end
+        end
+
+        return A
+    end
+end
+
+for (fname, elty, relty) in ((:dpstrf_, :Float64,    :Float64),
+                             (:spstrf_, :Float32,    :Float32),
+                             (:zpstrf_, :ComplexF64, :Float64),
+                             (:cpstrf_, :ComplexF32, :Float32))
+    @eval function pstrf!(uplo::AbstractChar, A::AbstractMatrix{$elty}, piv::AbstractVector{BlasInt}, work::AbstractVector{$relty}, tol::Real)
+        n = size(A, 2)
+        @assert length(piv) >= n
+        @assert length(work) >= 2n
+
+        lda = stride(A, 2)
+        rank = Ref{BlasInt}()
+        info = Ref{BlasInt}()
+
+        ccall((@blasfunc($fname), libblastrampoline), Cvoid,
+              (Ref{UInt8}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt}, Ptr{BlasInt},
+               Ptr{BlasInt}, Ref{$relty}, Ptr{$relty}, Ref{BlasInt}, Clong),
+              uplo, n, A, lda, piv, rank, tol, work, info, 1)
+
+        chkargsok(info[])
+
+        return rank[]
+    end
+end
+
 function braille_grid(io::IO, nrow, ncol)
     maxheight, maxwidth = displaysize(io)
     maxheight -= 4

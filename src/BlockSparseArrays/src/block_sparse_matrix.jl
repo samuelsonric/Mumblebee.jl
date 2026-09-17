@@ -129,6 +129,30 @@ struct BlockSparseMatrix{T, I} <: AbstractMatrix{T}
         @assert narc ≤ length(tgt)
         @assert nbnz ≤ length(val)
 
+        if !(xsrc isa FVector{I})
+            xsrc = FVector{I}(xsrc)
+        end
+
+        if !(xcol isa FVector{I})
+            xcol = FVector{I}(xcol)
+        end
+
+        if !(xrow isa FVector{I})
+            xrow = FVector{I}(xrow)
+        end
+
+        if !(xblk isa FVector{I})
+            xblk = FVector{I}(xblk)
+        end
+
+        if !(tgt isa FVector{I})
+            tgt = FVector{I}(tgt)
+        end
+
+        if !(val isa FVector{T})
+            val = FVector{T}(val)
+        end
+
         return new{T, I}(nout, nvtx, narc, ncol, nrow, nbnz, xsrc, xcol, xrow, xblk, tgt, val)
     end
 end
@@ -369,6 +393,10 @@ function SparseArrays.sparse(A::BlockSparseMatrix{T, I}) where {T, I}
 
     colptr[ncol + one(I)] = p + one(I)
     return SparseMatrixCSC(nrow, ncol, colptr, rowval, nzval)
+end
+
+function SparseArrays.sparse(A::AdjOrTransBlockSparseMatrix)
+    return sparse(copy(A))
 end
 
 function SparseArrays.nnz(A::BlockSparseMatrix)

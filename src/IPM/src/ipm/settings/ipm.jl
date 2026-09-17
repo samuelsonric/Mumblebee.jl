@@ -11,8 +11,8 @@
     refine_max_iter::Int = 10   # max KKT iterative-refinement passes
     newton_max_iter::Int = 100  # max CG iterations per KKT (Newton-system) solve
     aug_tol::T = 1e-7           # relative augmentation, in initial-problem units (the anchored knob)
-    pivot::Bool = false         # rank-revealing pivoted base factorization
     elim_alg::E = DEFAULT_ELIMINATION_ALGORITHM   # KKT elimination ordering (construction-time)
+    stable::Bool = false        # use the StableUzawaSolver (low-rank-update KKT factor)
     infeas_abs::T = 1e-8
     infeas_rel::T = 1e-8
 end

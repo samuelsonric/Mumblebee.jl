@@ -6,10 +6,6 @@ matrices.
 """
 struct SemidefiniteCone <: AbstractCone end
 
-# Bisection bracket width for the tridiagonal step-length path. eigminsturm!
-# certifies a lower bound on λmin (no Cholesky feasibility gate needed), so τ is
-# only ever short — never over — by at most this bracket.
-const TRIDIAG_TOL = 1e-6
 
 struct SemidefiniteConeCache{T} <: AbstractCache{SemidefiniteCone}
     cone::SemidefiniteCone
@@ -62,7 +58,9 @@ end
 # SDP workspace layout in data (d = triroot(n)):
 #   sdpscale!:              2 d²       (P, D; the SVD runs in place in the R cache)
 #   sdpcorr!:               3 d²       (ΔP, ΔD, W)
-#   sdpmaxstep tridiag:     2 d² + 2 d   (α doubles as the tridiag scratch)
+#   sdpmaxstep tridiag:     2 d² + 2 d   (α doubles as the tridiag scratch; C
+#                                          doubles as the τ=1 certificate scratch,
+#                                          its ΔX·F liveness ending at the congruence)
 # The bound is max(3 d², 2 d² + 2 d): sdpcorr! wins for d ≥ 2, the tridiag
 # maxstep only at d = 1.
 function workspacesize(::Type{SemidefiniteCone}, n::Integer)
@@ -158,29 +156,29 @@ function sdpscalestatic!(
         p::AbstractVector,
         d::AbstractVector,
         work::ConeWorkspace{T},
-        ::Val{N},
+        n::Val{N},
     ) where {T, N}
     m = N * N
     P = reshape(view(work.data, 0m + 1:1m), N, N)   # chol(smat p); reused for Y after S
     D = reshape(view(work.data, 1m + 1:2m), N, N)   # chol(smat d); → W
 
-    @inbounds smatstatic!(P, p, Val(N))
-    @inbounds smatstatic!(D, d, Val(N))
+    @inbounds smatstatic!(P, p, n)
+    @inbounds smatstatic!(D, d, n)
 
-    @inbounds cholstatic!(Symmetric(P, :L), Val(N)) || return false, zero(T)
-    @inbounds cholstatic!(Symmetric(D, :L), Val(N)) || return false, zero(T)
+    @inbounds cholstatic!(Symmetric(P, :L), n) || return false, zero(T)
+    @inbounds cholstatic!(Symmetric(D, :L), n) || return false, zero(T)
     #
     # svd of Pᵀ D straight into the R cache: R ← Pᵀ D, then
     # svd overwrites R with its left singular vectors U.
     # From there S = P U, then R = P⁻ᵀ U in place.
     #
-    @inbounds copystatic!(R, LowerTriangular(D), Val(N))
-    @inbounds lmulstatic!(LowerTriangular(P)', R, Val(N))     # R = Pᵀ D
+    @inbounds copystatic!(R, LowerTriangular(D), n)
+    @inbounds lmulstatic!(LowerTriangular(P)', R, n)     # R = Pᵀ D
     @inbounds svdjacobi!(R, s) || return false, zero(T)
 
-    @inbounds copystatic!(S, R, Val(N))                       # S = U
-    @inbounds lmulstatic!(LowerTriangular(P), S, Val(N))      # S = P U
-    @inbounds ldivstatic!(LowerTriangular(P)', R, Val(N))     # R = P⁻ᵀ U
+    @inbounds copystatic!(S, R, n)                       # S = U
+    @inbounds lmulstatic!(LowerTriangular(P), S, n)      # S = P U
+    @inbounds ldivstatic!(LowerTriangular(P)', R, n)     # R = P⁻ᵀ U
     #
     # W = R Σ Rᵀ = (R Σ^½)(R Σ^½)ᵀ:  Y = R Σ^½ into P, W into D
     #
@@ -192,9 +190,9 @@ function sdpscalestatic!(
         end
     end
 
-    @inbounds syrkstatic!(D, P, Val(N))
-    @inbounds symmstatic!(D, Val(N))
-    @inbounds skronstatic!(H, D, Val(N))
+    @inbounds syrkstatic!(D, P, n)
+    @inbounds symmstatic!(D, n)
+    @inbounds skronstatic!(H, D, n)
     #
     # ⟨p*, d*⟩ = tr(P⁻¹ D⁻¹) = Σ 1/sᵢ²  (sᵢ² = μ on the central path)
     #
@@ -234,7 +232,7 @@ function sdpscaledynamic!(
     # then S = P U and R = P⁻ᵀ U in place.
     copyto!(R, LowerTriangular(D))
     lmul!(LowerTriangular(P)', R)     # R = Pᵀ D
-    svdjacobi!(R, s)                  # R = left singular vectors
+    svdjacobi!(R, s) || return false, zero(T)   # R = left singular vectors
 
     copyto!(S, R)
     lmul!(LowerTriangular(P), S)      # S = P U
@@ -324,7 +322,7 @@ function sdpcorrstatic!(
         Δd::AbstractVector{T},
         σμ::Real,
         work::ConeWorkspace{T},
-        ::Val{N},
+        n::Val{N},
     ) where {T, N}
     m = N * N
 
@@ -332,24 +330,24 @@ function sdpcorrstatic!(
     ΔD = reshape(view(work.data, 1m + 1:2m), N, N)
     W  = reshape(view(work.data, 2m + 1:3m), N, N)   # intermediate, then A·B, then Ŵ, then R Ŵ Rᵀ
 
-    @inbounds smatstatic!(ΔP, Δp, Val(N))
-    @inbounds smatstatic!(ΔD, Δd, Val(N))
-    @inbounds symmstatic!(ΔP, Val(N))
-    @inbounds symmstatic!(ΔD, Val(N))
+    @inbounds smatstatic!(ΔP, Δp, n)
+    @inbounds smatstatic!(ΔD, Δd, n)
+    @inbounds symmstatic!(ΔP, n)
+    @inbounds symmstatic!(ΔD, n)
     #
     #   A = Rᵀ ΔP R   (ΔP overwritten with A; W the intermediate)
     #
-    @inbounds mulstatic!(W, ΔP, R, Val(N))
-    @inbounds mulstatic!(ΔP, R', W, Val(N))
+    @inbounds mulstatic!(W, ΔP, R, n)
+    @inbounds mulstatic!(ΔP, R', W, n)
     #
     #   B = Sᵀ ΔD S   (ΔD overwritten with B)
     #
-    @inbounds mulstatic!(W, ΔD, S, Val(N))
-    @inbounds mulstatic!(ΔD, S', W, Val(N))
+    @inbounds mulstatic!(W, ΔD, S, n)
+    @inbounds mulstatic!(ΔD, S', W, n)
     #
     #   W = A B   (not symmetric — both W[i,j] and W[j,i] are read below)
     #
-    @inbounds mulstatic!(W, ΔP, ΔD, Val(N))
+    @inbounds mulstatic!(W, ΔP, ΔD, n)
     #
     # Ŵ = Σ^½ (σμ Σ⁻¹ − Σ − 𝓛⁻¹(W)) Σ^½, overwriting W in place — each pair is
     # read then written (see sdpcorrdynamic! for the derivation)
@@ -366,10 +364,10 @@ function sdpcorrstatic!(
     #
     #   W = R Ŵ Rᵀ,  r = svec(W)   (ΔP dead, reused as the intermediate)
     #
-    @inbounds mulstatic!(ΔP, W, R', Val(N))
-    @inbounds mulstatic!(W, R, ΔP, Val(N))
+    @inbounds mulstatic!(ΔP, W, R', n)
+    @inbounds mulstatic!(W, R, ΔP, n)
 
-    @inbounds svecstatic!(r, W, Val(N))
+    @inbounds svecstatic!(r, W, n)
     return r
 end
 
@@ -467,7 +465,7 @@ function sdpcorr0static!(
         s::AbstractVector{T},
         σμ::Real,
         work::ConeWorkspace{T},
-        ::Val{N},
+        n::Val{N},
     ) where {T, N}
     m = N * N
 
@@ -484,10 +482,10 @@ function sdpcorr0static!(
     #
     #   W = R Ŵ Rᵀ,  r = svec(W)   (ΔP the intermediate)
     #
-    @inbounds mulstatic!(ΔP, W, R', Val(N))
-    @inbounds mulstatic!(W, R, ΔP, Val(N))
+    @inbounds mulstatic!(ΔP, W, R', n)
+    @inbounds mulstatic!(W, R, ΔP, n)
 
-    @inbounds svecstatic!(r, W, Val(N))
+    @inbounds svecstatic!(r, W, n)
     return r
 end
 
@@ -541,15 +539,6 @@ end
 #
 # where λ is the smallest eigenvalue of L⁻¹ ΔX L⁻ᵀ.
 #
-# Tiered step-length computation: dispatch by matrix size. The step matrix M is
-# an orthogonal congruence of the factor F (F = R for τp, F = S for τd), plus a
-# Σ⁻¹·Σ⁻¹ scaling for the dual. M has the same spectrum as LP⁻¹ΔP LP⁻ᵀ /
-# LD⁻¹ΔD LD⁻ᵀ, so the step length is unchanged — no triangular factor is needed.
-#
-# n ≤ 8:            unrolled congruence; closed-form eigmin (n ≤ 3) or
-#                   Householder tridiagonalization + Sturm bisection (n ≥ 4)
-# n ≥ 9:            dynamic congruence + tridiagonalization + Sturm
-#
 function sdpmaxstep(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}) where {T}
     n = size(F, 1)
 
@@ -564,56 +553,58 @@ function sdpmaxstep(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::C
     return sdpmaxstepdynamic(F, Δx, scale, work)
 end
 
-function sdpmaxstepstatic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}, ::Val{N}) where {T, N}
+function sdpmaxstepstatic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}, n::Val{N}) where {T, N}
     m = N * N
-    M   = reshape(view(work.data, 0m + 1:1m), N, N)
-    tmp = reshape(view(work.data, 1m + 1:2m), N, N)
+    M = reshape(view(work.data, 0m + 1:1m), N, N)
+    C = reshape(view(work.data, 1m + 1:2m), N, N)
 
-    @inbounds smatstatic!(M, Δx, Val(N))
-    @inbounds symmstatic!(M, Val(N))
-    @inbounds mulstatic!(tmp, M, F, Val(N))          # tmp = ΔX F
-    @inbounds mulstatic!(M, F', tmp, Val(N))         # M = Fᵀ ΔX F
+    @inbounds smatstatic!(M, Δx, n)
+    @inbounds symmstatic!(M, n)
+    @inbounds mulstatic!(C, M, F, n)          # C = ΔX F
+    @inbounds mulstatic!(M, F', C, n)         # M = Fᵀ ΔX F
 
     if !isnothing(scale)
         @inbounds for j in 1:N, i in 1:N
             M[i, j] /= scale[i] * scale[j]
         end
     end
-    #
-    # closed-form eigmin for n ≤ 3, else Householder tridiag + Sturm bisection
-    # (α, β carved from the workspace tail past M and tmp; α doubles as the
-    # tridiagonalization scratch)
-    #
+
+    @inbounds for j in 1:N
+        for i in j:N
+            C[i, j] = M[i, j]
+        end
+
+        C[j, j] += one(T)
+    end
+
+    if @inbounds cholstatic!(Symmetric(C, :L), n)
+        return one(T)
+    end
+
     if N ≤ 3
-        @inbounds λ = eigminstatic(M, Val(N))
+        @inbounds λ = eigminstatic(M, n)
     else
         α = view(work.data, 2m + 0N + 1:2m + 1N)
         β = view(work.data, 2m + 1N + 1:2m + 2N)
-        @inbounds λ = eigminsturm!(M, α, β, T(TRIDIAG_TOL), -one(T))
+        @inbounds λ = eigminsturm!(M, α, β, -one(T))
     end
 
     return inv(max(one(T), -λ))
 end
 
-# n ≥ 9: Householder tridiagonalization (exact orthogonal similarity) + Sturm
-# bisection. Sturm counting makes `lo` a certified lower bound on λmin, so —
-# unlike the old Kato-Temple/Lanczos path — no Cholesky feasibility gate exists.
-# Beats LAPACK dsyevr at every size measured (to n=64+), so there is no dense tier.
-function sdpmaxstepdynamic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}; tol::T = T(TRIDIAG_TOL)) where {T}
+function sdpmaxstepdynamic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, work::ConeWorkspace{T}) where {T}
     n = size(F, 1)
 
     o = 0
-    M   = reshape(view(work.data, o + 1:o + n * n), n, n); o += n * n
-    tmp = reshape(view(work.data, o + 1:o + n * n), n, n); o += n * n
-    α =         view(work.data, o + 1:o + n);              o += n
-    β =         view(work.data, o + 1:o + n)
-    #
-    # M = Fᵀ ΔX F (+ Σ⁻¹·Σ⁻¹ for the dual): ΔX built in M, congruence via tmp
-    #
+    M = reshape(view(work.data, o + 1:o + n * n), n, n); o += n * n
+    C = reshape(view(work.data, o + 1:o + n * n), n, n); o += n * n
+    α = view(work.data, o + 1:o + n);                    o += n
+    β = view(work.data, o + 1:o + n)
+
     smat!(M, Δx)
     symmetrize!(M)
-    mul!(tmp, M, F)
-    mul!(M, F', tmp)
+    mul!(C, M, F)
+    mul!(M, F', C)
 
     if !isnothing(scale)
         @inbounds for j in 1:n, i in 1:n
@@ -621,7 +612,19 @@ function sdpmaxstepdynamic(F::AbstractMatrix{T}, Δx::AbstractVector{T}, scale, 
         end
     end
 
-    @inbounds λ = eigminsturm!(M, α, β, tol, -one(T))
+    @inbounds for j in 1:n
+        for i in j:n
+            C[i, j] = M[i, j]
+        end
+
+        C[j, j] += one(T)
+    end
+
+    if issuccess(cholesky!(Symmetric(C, :L); check=false))
+        return one(T)
+    end
+
+    @inbounds λ = eigminsturm!(M, α, β, -one(T))
 
     return inv(max(one(T), -λ))
 end
@@ -656,17 +659,19 @@ function sdpshadow!(s::AbstractVector{T}, x::AbstractVector{T}, work::ConeWorksp
     return sdpshadowdynamic!(s, x, M, Z)
 end
 
-function sdpshadowstatic!(s::AbstractVector{T}, x::AbstractVector{T}, M::AbstractMatrix{T}, Z::AbstractMatrix{T}, ::Val{N}) where {T, N}
-    @inbounds smatstatic!(M, x, Val(N))
-    @inbounds cholstatic!(Symmetric(M, :L), Val(N)) || return false
+function sdpshadowstatic!(s::AbstractVector{T}, x::AbstractVector{T}, M::AbstractMatrix{T}, Z::AbstractMatrix{T}, n::Val{N}) where {T, N}
+    @inbounds smatstatic!(M, x, n)
+    @inbounds cholstatic!(Symmetric(M, :L), n) || return false
 
-    @inbounds for j in 1:N, i in 1:N
-        Z[i, j] = ifelse(i == j, one(T), zero(T))
+    @inbounds for j in 1:N
+        for i in 1:N
+            Z[i, j] = ifelse(i == j, one(T), zero(T))
+        end
     end
 
-    @inbounds ldivstatic!(LowerTriangular(M), Z, Val(N))
-    @inbounds ldivstatic!(LowerTriangular(M)', Z, Val(N))
-    @inbounds svecstatic!(s, Z, Val(N))
+    @inbounds ldivstatic!(LowerTriangular(M), Z, n)
+    @inbounds ldivstatic!(LowerTriangular(M)', Z, n)
+    @inbounds svecstatic!(s, Z, n)
     return true
 end
 
@@ -688,10 +693,6 @@ end
 # primalhess!
 ############################################################################################
 
-# F = −log det X, X = smat(p). Cached R satisfies R Rᵀ = X⁻¹, so with Ũ = RᵀUR, Ṽ = RᵀVR
-# (U = smat u, V = smat v):
-#   F″[u]    = svec(R Ũ Rᵀ)
-#   ∇³F[u,v] = −svec(R (ŨṼ + ṼŨ) Rᵀ) = −svec(R (ŨṼ + (ŨṼ)ᵀ) Rᵀ)
 function primalhess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, cache::SemidefiniteConeCache, work::ConeWorkspace)
     return sdphess!(r, p, Δp, cache.R, work)
 end
@@ -709,18 +710,18 @@ function sdphess!(r::AbstractVector, p::AbstractVector, Δp::AbstractVector, R::
     return sdphessdynamic!(r, Δp, R, work)
 end
 
-function sdphessstatic!(r, Δp, R, work, ::Val{N}) where {N}
+function sdphessstatic!(r, Δp, R, work, n::Val{N}) where {N}
     m = N * N
     U = reshape(view(work.data, 0m + 1:1m), N, N)
     A = reshape(view(work.data, 1m + 1:2m), N, N)
 
-    @inbounds smatstatic!(U, Δp, Val(N))
-    @inbounds symmstatic!(U, Val(N))
-    @inbounds mulstatic!(A, R', U, Val(N))
-    @inbounds mulstatic!(U, A, R, Val(N))                 # U = Ũ = RᵀUR
-    @inbounds mulstatic!(A, R, U, Val(N))
-    @inbounds mulstatic!(U, A, R', Val(N))                # U = R Ũ Rᵀ
-    @inbounds svecstatic!(r, U, Val(N))
+    @inbounds smatstatic!(U, Δp, n)
+    @inbounds symmstatic!(U, n)
+    @inbounds mulstatic!(A, R', U, n)
+    @inbounds mulstatic!(U, A, R, n)                 # U = Ũ = RᵀUR
+    @inbounds mulstatic!(A, R, U, n)
+    @inbounds mulstatic!(U, A, R', n)                # U = R Ũ Rᵀ
+    @inbounds svecstatic!(r, U, n)
     return r
 end
 
@@ -760,21 +761,21 @@ function sdpthird!(r::AbstractVector, p::AbstractVector, Δp1::AbstractVector, �
     return sdpthirddynamic!(r, Δp1, Δp2, R, work)
 end
 
-function sdpthirdstatic!(r, Δp1, Δp2, R, work, ::Val{N}) where {N}
+function sdpthirdstatic!(r::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector, R::AbstractMatrix, work::ConeWorkspace, n::Val{N}) where {N}
     m = N * N
     U = reshape(view(work.data, 0m + 1:1m), N, N)
     V = reshape(view(work.data, 1m + 1:2m), N, N)
     A = reshape(view(work.data, 2m + 1:3m), N, N)
 
-    @inbounds smatstatic!(U, Δp1, Val(N))
-    @inbounds symmstatic!(U, Val(N))
-    @inbounds smatstatic!(V, Δp2, Val(N))
-    @inbounds symmstatic!(V, Val(N))
-    @inbounds mulstatic!(A, R', U, Val(N))
-    @inbounds mulstatic!(U, A, R, Val(N))                 # U = Ũ
-    @inbounds mulstatic!(A, R', V, Val(N))
-    @inbounds mulstatic!(V, A, R, Val(N))                 # V = Ṽ
-    @inbounds mulstatic!(A, U, V, Val(N))                 # A = ŨṼ
+    @inbounds smatstatic!(U, Δp1, n)
+    @inbounds symmstatic!(U, n)
+    @inbounds smatstatic!(V, Δp2, n)
+    @inbounds symmstatic!(V, n)
+    @inbounds mulstatic!(A, R', U, n)
+    @inbounds mulstatic!(U, A, R, n)                 # U = Ũ
+    @inbounds mulstatic!(A, R', V, n)
+    @inbounds mulstatic!(V, A, R, n)                 # V = Ṽ
+    @inbounds mulstatic!(A, U, V, n)                 # A = ŨṼ
 
     @inbounds for i in 1:N                                # A ← ŨṼ + (ŨṼ)ᵀ = ŨṼ + ṼŨ
         A[i, i] *= 2
@@ -784,14 +785,14 @@ function sdpthirdstatic!(r, Δp1, Δp2, R, work, ::Val{N}) where {N}
         end
     end
 
-    @inbounds mulstatic!(U, R, A, Val(N))
-    @inbounds mulstatic!(A, U, R', Val(N))                # A = R(ŨṼ+ṼŨ)Rᵀ
-    @inbounds svecstatic!(r, A, Val(N))
+    @inbounds mulstatic!(U, R, A, n)
+    @inbounds mulstatic!(A, U, R', n)                # A = R(ŨṼ+ṼŨ)Rᵀ
+    @inbounds svecstatic!(r, A, n)
     rmul!(r, -1)
     return r
 end
 
-function sdpthirddynamic!(r, Δp1, Δp2, R, work)
+function sdpthirddynamic!(r::AbstractVector, Δp1::AbstractVector, Δp2::AbstractVector, R::AbstractMatrix, work::ConeWorkspace)
     n = size(R, 1); m = n * n
     U = reshape(view(work.data, 0m + 1:1m), n, n)
     V = reshape(view(work.data, 1m + 1:2m), n, n)

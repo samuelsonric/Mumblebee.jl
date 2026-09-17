@@ -387,45 +387,105 @@ end
     return α, β
 end
 
-@propagate_inbounds function checksturm(α::AbstractVector{T}, β::AbstractVector{T}, mid::T, n::Int) where {T}
-    #
-    # T - mid I is positive definite
-    # if-and-only if its leading principal
-    # minors
-    #
-    #   p₀ =  1
-    #   p₁ =  α₁ - mid
-    #    ⋮
-    #   pᵢ = (αᵢ - mid) pᵢ₋₁ - βᵢ₋₁² pᵢ₋₂
-    #    ⋮
-    #   pₙ = (αₙ - mid) pₙ₋₁ - βₙ₋₁² pₙ₋₂
-    #
-    # are all positive. If any pᵢ is nonpositive,
-    # then λ < mid.
-    #
-    flag = false
+#
+# T - λ I is positive definite
+# if-and-only if its leading principal
+# minors
+#
+#   p₀ =  1
+#   p₁ =  α₁ - λ
+#    ⋮
+#   pᵢ = (αᵢ - λ) pᵢ₋₁ - βᵢ₋₁² pᵢ₋₂
+#    ⋮
+#   pₙ = (αₙ - λ) pₙ₋₁ - βₙ₋₁² pₙ₋₂
+#
+# are all positive. If any pᵢ is nonpositive,
+# then λmin < λ.
+#
+# Returns a triple (flag, s₁, s₂), where flag
+# indicates whether λmin < λ and
+#
+#  s₁ = tr((T - λI)⁻¹)
+#  s₂ = tr((T - λI)⁻²)
+#
+@propagate_inbounds function minorpass(α::AbstractVector{T}, β::AbstractVector{T}, λ::T, n::Int) where {T}
+    @boundscheck checkbounds(α, n)
+    @boundscheck n < 2 || checkbounds(β, n - 1)
 
-    pm1 = one(T); p = α[1] - mid
+    flag = false; s₁ = s₂ = zero(T)
 
-    if !(p > 0)
+    hi = ldexp(one(T), exponent(floatmax(T)) >> 1)
+    lo = inv(hi)
+    #
+    # initialize
+    #
+    #   (p₀, p₀', p₀'') = (1,       0, 0)
+    #   (p₁, p₁', p₁'') = (α₁ - λ, -1, 0)
+    #
+    p  = one(T);   pd  = zero(T); pdd = zero(T)
+    q  = α[1] - λ; qd  = -one(T); qdd = zero(T)
+
+    if q > 0
         flag = true
-    else
-        for i in 2:n
-            pp1 = muladd(α[i] - mid, p, -β[i - 1]^2 * pm1)
 
-            if !(pp1 > 0)
-                flag = true
+        @inbounds for i in 2:n
+            a = α[i] - λ
+            b = β[i - 1]^2
+
+            r   = muladd(a, q,          -b * p)
+            rd  = muladd(a, qd,  muladd(-b,  pd,  -q))
+            rdd = muladd(a, qdd, muladd(-b,  pdd, -2qd))
+
+            if !(r > 0)
+                flag = false
                 break
             end
 
-            pm1 = p; p = pp1
+            if abs(r) > hi
+                r *= lo; rd *= lo; rdd *= lo
+                q *= lo; qd *= lo; qdd *= lo
+            elseif abs(r) < lo
+                r *= hi; rd *= hi; rdd *= hi
+                q *= hi; qd *= hi; qdd *= hi
+            end
+
+            p = q;  pd = qd;  pdd = qdd
+            q = r;  qd = rd;  qdd = rdd
+        end
+
+        if flag
+            s₁ = -qd / q
+            s₂ =  muladd(s₁, s₁, -qdd / q)
         end
     end
 
-    return flag
+    return flag, s₁, s₂
 end
 
-@propagate_inbounds function eigminsturm!(M::AbstractMatrix{T}, α::AbstractVector{T}, β::AbstractVector{T}, tol::T, λmax::T) where {T}
+@propagate_inbounds function laguerremin(α::AbstractVector{T}, β::AbstractVector{T}, lo::T, hi::T, n::Int) where {T}
+    @boundscheck checkbounds(α, n)
+    @boundscheck n < 2 || checkbounds(β, n - 1)
+
+    md = lo
+
+    for _ in 1:40
+        flag, s₁, s₂ = minorpass(α, β, md, n)
+
+        if !flag
+            hi = md
+            md = (lo + hi) / 2
+            md > lo || break
+        else
+            lo = md
+            md = min(lo + n / (s₁ + sqrt(max(zero(T), (n - 1) * muladd(n, s₂, -s₁^2)))), prevfloat(hi))
+            md > lo + 4eps(T) * max(one(T), abs(lo)) || break
+        end
+    end
+
+    return lo
+end
+
+@propagate_inbounds function eigminsturm!(M::AbstractMatrix{T}, α::AbstractVector{T}, β::AbstractVector{T}, λmax::T) where {T}
     n = size(M, 1)
 
     @boundscheck checkbounds(M, n, n)
@@ -500,55 +560,29 @@ end
         #   hi := min Tᵢᵢ
         #          i
         #
-        # and compute the norm
-        #
-        #   nrm := ‖ T ‖∞
-        #
         lo = typemax(T)
         hi = typemax(T)
-        nrm = typemin(T)
         βim1 = zero(T)
 
         @inbounds for i in 1:n - 1
-            αi   = α[i]
-            βi   = β[i]
+            αi = α[i]
+            βi = β[i]
 
             lo = min(lo, αi - abs(βim1) - abs(βi))
             hi = min(hi, αi)
-            nrm = max(nrm, abs(αi) + abs(βim1) + abs(βi))
 
             βim1 = βi
         end
 
         @inbounds αn = α[n]
 
-        lo = min(lo, αn - abs(βim1))
-        hi = min(hi, αn)
-        nrm = max(nrm, abs(αn) + abs(βim1))
-
-        mx = ldexp(λmax, -texp)
-
-        if mx ≤ lo || (mx < hi && !checksturm(α, β, mx, n))
-            λ = λmax
-        else
-            lo -= abs(lo) * tol
-            hi  = min(hi, mx)
-            #
-            # compute the minimum eigenvalue of T
-            # using Sturm bisection
-            #
-            @inbounds while hi - lo > tol * max(one(T), abs(lo), abs(hi))
-                mid = (lo + hi) / 2
-
-                if checksturm(α, β, mid, n)
-                    hi = mid
-                else
-                    lo = mid
-                end
-            end
-
-            λ = ldexp(lo, texp)
-        end
+        hi = min(hi, αn, ldexp(λmax, -texp))
+        lo = min(lo, αn - abs(βim1), hi)
+        #
+        # compute the minimum eigenvalue of T
+        # using Laguerre iterations
+        #
+        @inbounds λ = ldexp(laguerremin(α, β, lo, hi, n), texp)
     end
 
     return λ

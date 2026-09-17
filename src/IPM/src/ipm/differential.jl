@@ -6,7 +6,8 @@ function frule!(Δp, Δy, Δd, s::IPMSolver, Δf, Δg, Δμ)
     δ = getaug(s)
     initok, _ = initkkt!(s, δ)
     initok || error()
-    tol = FORCING_FRAC * last(s.hist.μ) / first(s.hist.μ)   # the forcing tol that converged the solve
+    μ0 = first(s.hist.μ)                                    # 0 when ν = 0 (no cones anywhere)
+    tol = iszero(μ0) ? FORCING_FRAC * s.settings.gap_tol : FORCING_FRAC * last(s.hist.μ) / μ0
     ftol = tol * (1 + s.nf[])
     gtol = tol * (1 + s.ng[])
     return frule!(Δp, Δy, Δd, s.B, s.p, s.y, s.K, s.caches, s.sched,
@@ -92,7 +93,8 @@ function frule2!(
     δ = getaug(s)
     initok, _ = initkkt!(s, δ)
     initok || error()
-    tol = FORCING_FRAC * last(s.hist.μ) / first(s.hist.μ)   # the forcing tol that converged the solve
+    μ0 = first(s.hist.μ)                                    # 0 when ν = 0 (no cones anywhere)
+    tol = iszero(μ0) ? FORCING_FRAC * s.settings.gap_tol : FORCING_FRAC * last(s.hist.μ) / μ0
     ftol = tol * (1 + s.nf[])
     gtol = tol * (1 + s.ng[])
     return frule2!(Δp1, Δy1, Δd1, Δp2, Δy2, Δd2, Δp12, Δy12, Δd12,
@@ -257,7 +259,8 @@ function rrule!(Δf, Δg, s::IPMSolver, Δp, Δy, Δd)
     δ = getaug(s)
     initok, _ = initkkt!(s, δ)
     initok || error()
-    tol = FORCING_FRAC * last(s.hist.μ) / first(s.hist.μ)   # the forcing tol that converged the solve
+    μ0 = first(s.hist.μ)                                    # 0 when ν = 0 (no cones anywhere)
+    tol = iszero(μ0) ? FORCING_FRAC * s.settings.gap_tol : FORCING_FRAC * last(s.hist.μ) / μ0
     ftol = tol * (1 + s.nf[])
     gtol = tol * (1 + s.ng[])
     return rrule!(Δf, Δg, s.B, s.p, s.y, s.K, s.caches, s.sched,

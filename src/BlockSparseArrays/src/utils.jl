@@ -138,6 +138,37 @@ for (fname, elty, relty) in ((:dpstrf_, :Float64,    :Float64),
     end
 end
 
+for (fname, elty) in ((:dgesdd_, :Float64), (:sgesdd_, :Float32))
+    @eval function gesdd!(job::AbstractChar, A::AbstractMatrix{$elty}, S::AbstractVector{$elty}, U::AbstractMatrix{$elty}, V::AbstractMatrix{$elty}, work::Vector{$elty}, iwork::Vector{BlasInt})
+        m, n = size(A)
+        lda  = max(1, stride(A, 2))
+        ldu  = max(1, stride(U, 2))
+        ldv  = max(1, stride(V, 2))
+        info = Ref{BlasInt}()
+        lwork = BlasInt(-1)
+
+        length(work) < 1 && resize!(work, 1)
+
+        for i in 1:2
+            ccall((@blasfunc($fname), libblastrampoline), Cvoid,
+                  (Ref{UInt8}, Ref{BlasInt}, Ref{BlasInt}, Ptr{$elty},
+                   Ref{BlasInt}, Ptr{$elty}, Ptr{$elty}, Ref{BlasInt},
+                   Ptr{$elty}, Ref{BlasInt}, Ptr{$elty}, Ref{BlasInt},
+                   Ptr{BlasInt}, Ref{BlasInt}, Clong),
+                  job, m, n, A, lda, S, U, ldu, V, ldv, work, lwork, iwork, info, 1)
+
+            chklapackerror(info[])
+
+            if i == 1
+                lwork = round(BlasInt, nextfloat(real(work[1])))
+                length(work) < lwork && resize!(work, lwork)
+            end
+        end
+
+        return S, V
+    end
+end
+
 function braille_grid(io::IO, nrow, ncol)
     maxheight, maxwidth = displaysize(io)
     maxheight -= 4

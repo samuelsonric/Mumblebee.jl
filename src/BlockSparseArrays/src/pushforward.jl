@@ -2,6 +2,20 @@
 # pushforward
 # ==========================================================================
 
+@enum PushforwardMethod PUSHFORWARD_CHOLESKY PUSHFORWARD_QR PUSHFORWARD_SVD
+
+function PushforwardMethod(method::Symbol)
+    if method === :cholesky
+        return PUSHFORWARD_CHOLESKY
+    elseif method === :qr
+        return PUSHFORWARD_QR
+    elseif method === :svd
+        return PUSHFORWARD_SVD
+    else
+        error()
+    end
+end
+
 function pushforward(A::BlockSparseMatrix{T, I}, G::SparseMatrixCSC{<:Any, I}, U::AbstractVector{I}, V::AbstractVector{I}; kw...) where {T, I}
     nout = convert(I, size(G, 1))
     nvtx = convert(I, size(G, 2))
@@ -23,10 +37,10 @@ function pushforward(
         V::AbstractVector{I};
         atol::Real = 0,
         rtol::Real = atol > 0 ? zero(T) : eps(T),
-        qr::Bool = false,
+        method = :cholesky,
     ) where {T, I}
 
-    return pushforward(A, nout, nvtx, narc, xsrc, tgt, U, V, convert(T, atol), convert(T, rtol), qr)
+    return pushforward(A, nout, nvtx, narc, xsrc, tgt, U, V, convert(T, atol), convert(T, rtol), PushforwardMethod(method))
 end
 
 function pushforward(
@@ -40,7 +54,7 @@ function pushforward(
         Pmap::AbstractVector{I},
         atol::T,
         rtol::T,
-        qr::Bool,
+        method::PushforwardMethod,
     ) where {T, I}
 
     @assert nCout >= zero(I)
@@ -61,7 +75,7 @@ function pushforward(
     Rxsrc = FVector{I}(undef, nCout + one(I))
     Rtgt  = FVector{I}(undef, nAout)
 
-    B = push_make_B!(Qxsrc, Qtgt, Rtgt, A, nCvtx, Qmap, Pmap, atol, rtol, qr)
+    B = push_make_B!(Qxsrc, Qtgt, Rtgt, A, nCvtx, Qmap, Pmap, atol, rtol, method)
     C = push_make_C!(Rxsrc, Rtgt, Qtgt, Qxsrc, A, B, nCout, nCarc, Cxsrc, Ctgt, Qmap)
 
     return B, C
@@ -261,6 +275,79 @@ function push_null_qr!(M::AbstractMatrix, N::AbstractMatrix, piv::AbstractVector
     return k
 end
 
+function push_null_svd!(M::AbstractMatrix, N::AbstractMatrix, S::AbstractVector, U::AbstractMatrix, work::Vector, iwork::Vector, atol::Real, rtol::Real)
+    @assert size(N, 1) >= size(M, 2)
+    @assert size(N, 2) >= size(M, 2)
+    @assert length(S) >= min(size(M, 1), size(M, 2))
+    @assert size(U, 1) >= size(M, 1)
+    @assert size(U, 2) >= size(M, 1)
+    @assert length(iwork) >= 8 * min(size(M, 1), size(M, 2))
+    @assert atol >= 0
+    @assert rtol >= 0
+
+    m, n = size(M); mn = min(m, n)
+
+    if n == 0
+        k = 0
+    elseif m == 0
+        #
+        #   N ← I
+        #
+        for j in 1:n
+            for i in 1:n
+                N[i, j] = 0
+            end
+
+            N[j, j] = 1
+        end
+
+        k = n
+    else
+        #
+        # factorize M:
+        #
+        #   M = U Σ N
+        #
+        gesdd!('A', M, S, U, N, work, iwork)
+        #
+        # compute the pivot tolerance
+        #
+        #   ϵ = max(atol, rtol n σ₁²)
+        #
+        tol = max(atol, rtol * n * S[1]^2)
+        #
+        # compute the rank r and nullity k:
+        #
+        #   r := rank(M)
+        #   k := null(M)
+        #
+        r = 0
+
+        for i in 1:mn
+            S[i]^2 > tol || break
+            r += 1
+        end
+
+        k = n - r
+        #
+        # write the nullspace to the first k columns of N:
+        #
+        for j in 1:n
+            for i in 1:k
+                N[i, j] = N[r + i, j]
+            end
+        end
+
+        for j in 1:n
+            for i in 1:min(j - 1, k)
+                N[i, j], N[j, i] = N[j, i], N[i, j]
+            end
+        end
+    end
+
+    return k
+end
+
 function push_prim!(
         xsrc::AbstractVector{I},
         tgt::AbstractVector{I},
@@ -325,7 +412,7 @@ function push_make_B!(
         Pmap::AbstractVector{I},
         atol::T,
         rtol::T,
-        qr::Bool,
+        method::PushforwardMethod,
     ) where {T, I}
     @assert nBvtx >= zero(I)
     @assert length(Qxsrc) > nBvtx
@@ -363,6 +450,7 @@ function push_make_B!(
     mMbnz = zero(I)
     mNbnz = zero(I)
     mMcol = zero(I)
+    mMrow = zero(I)
 
     for Bv in oneto(nBvtx)
         Qebgn = Qxsrc[Bv]
@@ -384,6 +472,7 @@ function push_make_B!(
         mMbnz = max(mMbnz, nMrow * nMcol)
         mNbnz = max(mNbnz, nMcol * nMcol)
         mMcol = max(mMcol, nMcol)
+        mMrow = max(mMrow, nMrow)
     end
 
     # ======================================================================
@@ -402,11 +491,16 @@ function push_make_B!(
     Nval  = FVector{T}(undef, mNbnz)
     piv = Vector{BlasInt}(undef, mMcol)
 
-    if qr
+    if method === PUSHFORWARD_CHOLESKY
+        work = Vector{T}(undef, 2mMcol)
+    elseif method === PUSHFORWARD_QR
         work = T[]
         tau  = Vector{T}(undef, mMcol)
     else
-        work = Vector{T}(undef, 2mMcol)
+        work  = T[]
+        S     = Vector{T}(undef, mMcol)
+        Uval  = FVector{T}(undef, mMrow * mMrow)
+        iwork = Vector{BlasInt}(undef, 8mMcol)
     end
 
     nBcol = Bb = zero(I)
@@ -458,10 +552,13 @@ function push_make_B!(
             Mj += vAcol
         end
 
-        if qr
+        if method === PUSHFORWARD_CHOLESKY
+            nNcol = convert(I, push_null_chol!(M, N, piv, work, atol, rtol))
+        elseif method === PUSHFORWARD_QR
             nNcol = convert(I, push_null_qr!(M, N, piv, tau, work, atol, rtol))
         else
-            nNcol = convert(I, push_null_chol!(M, N, piv, work, atol, rtol))
+            U = reshape(view(Uval, oneto(nMrow * nMrow)), nMrow, nMrow)
+            nNcol = convert(I, push_null_svd!(M, N, S, U, work, iwork, atol, rtol))
         end
 
         Nibgn = one(I)
@@ -509,7 +606,7 @@ function push_make_C!(
         nCarc::I,
         Cxsrc::AbstractVector{I},
         Ctgt::AbstractVector{I},
-        uhm::AbstractVector{I},
+        Qmap::AbstractVector{I},
     ) where {T, I}
     @assert nCout >= zero(I)
     @assert nCarc >= zero(I)
@@ -519,18 +616,18 @@ function push_make_C!(
     @assert length(flag) >= nvtxs(B)
     @assert length(Cxsrc) > nvtxs(B)
     @assert length(Ctgt) >= nCarc
-    @assert length(uhm) >= nouts(A)
+    @assert length(Qmap) >= nouts(A)
 
     nAout = nouts(A)
     nCvtx = nvtxs(B)
 
-    push_prim!(Rxsrc, Rtgt, uhm, nAout, nCout, Val(:P))
+    push_prim!(Rxsrc, Rtgt, Qmap, nAout, nCout, Val(:P))
 
     C = push_init_C(A, B, nCout, nCvtx, nCarc, Cxsrc, Ctgt, Rxsrc, Rtgt)
 
     push_symb_C!(C, A, B, Rxsrc, Rtgt)
 
-    push_numb_C!(Stgt, flag, C, A, B, uhm, Rxsrc, Rtgt)
+    push_numb_C!(Stgt, flag, C, A, B, Qmap, Rxsrc, Rtgt)
 
     return C
 end
